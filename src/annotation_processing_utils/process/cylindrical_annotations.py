@@ -46,7 +46,7 @@ class VoxelNmConverter:
             self.voxel = nm_coordinates / resolution
 
 
-class PreprocessCylindricalAnnotations:
+class CylindricalAnnotations:
     def __init__(
         self,
         username,

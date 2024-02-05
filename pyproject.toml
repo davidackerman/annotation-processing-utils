@@ -1,0 +1,17 @@
+[project]
+name = "annotation-processing-utils"
+version = "0.0.1"
+
+requires-python = ">=3.8"
+authors = [
+  {name = "David Ackerman", email = "ackermand@janelia.hhmi.org"},
+]
+maintainers = [
+  {name = "David Ackerman", email = "ackermand@janelia.hhmi.org"},
+]
+description = "Utils for processing neuroglancer annotations"
+readme = "README.md"
+license = {file = "LICENSE.txt"}
+
+[project.entry-points."spam.magical"]
+tomatoes = "src:annotation_processing_utils"
