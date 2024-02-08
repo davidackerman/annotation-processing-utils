@@ -29,34 +29,73 @@ class RoiSplitter:
     # currently predfined rois are only for validation/test
     def __init__(
         self,
-        training_validation_test_rois_to_split_yml=None,
-        annotations_to_split_automatically=[],
-        validation_test_rois_to_split_yml=None,
-        annotations_to_split_by_rois=[],
-        resolution=8,
+        training_validation_test_roi_info_yml,
     ):
-        if not (annotations_to_split_by_rois or annotations_to_split_automatically):
-            raise Exception(
-                "No annotations provided. Need to privde annotations_to_split_by_rois or annotations_to_split_automatically."
-            )
-        self.training_validation_test_rois_to_split_yml = (
-            training_validation_test_rois_to_split_yml
-        )
-        self.validation_test_rois_to_split_yml = validation_test_rois_to_split_yml
-        self.annotations_to_split_by_rois = annotations_to_split_by_rois
-        self.annotations_to_split_automatically = annotations_to_split_automatically
-        self.resolution = resolution
         self.rois_dict = {"training": [], "validation": [], "test": []}
+        self.__extract_training_validation_test_info(
+            training_validation_test_roi_info_yml
+        )
+        self.get_training_validation_test_rois()
 
+    def __extract_training_validation_test_info(
+        self, training_validation_test_info_yml
+    ):
+        self.annotation_csvs = []
+        self.annotations_to_split_automatically = {}
+        self.rois_to_split_in_voxels = {}
+        for roi_type in ["training_validation_test", "validation_test"]:
+            self.annotations_to_split_automatically[roi_type] = []
+            self.rois_to_split_in_voxels[roi_type] = []
+
+        with open(training_validation_test_info_yml, "r") as stream:
+            info = yaml.safe_load(stream)
+
+        self.resolution = info["resolution"]
+
+        # annotations
+        for split_method, split_method_values in info["annotations"].items():
+            if split_method == "split_by_rois":
+                self.annotation_csvs.extend(split_method_values)
+            elif split_method == "split_automatically":
+                for roi_type, annotation_csvs in split_method_values.items():
+                    for annotation_csv in annotation_csvs:
+                        self.annotation_csvs.append(annotation_csv)
+                        self.rois_to_split_in_voxels[roi_type].append(
+                            self.__get_roi_to_split_from_annotation_csv(annotation_csv)
+                        )
         self.__get_all_annotation_centers_voxels()
-        self.__get_rois_to_split()
+
+        # rois
+        if "rois_to_split" in info:
+            for roi_type, rois in info["rois_to_split"].items():
+                if roi_type not in self.rois_to_split_in_voxels:
+                    self.rois_to_split_in_voxels[roi_type] = []
+                for roi in rois:
+                    roi_start = np.zeros((3, 1))
+                    roi_end = np.zeros((3, 1))
+                    for idx, dim in enumerate(["z", "y", "x"]):
+                        dim_start, dim_end = roi[dim].split("-")
+                        roi_start[idx] = int(dim_start)
+                        roi_end[idx] = int(dim_end)
+                    roi_to_split_in_voxels = RoiToSplitInVoxels(
+                        roi_start,
+                        roi_end,
+                        self.resolution,
+                        roi["split_dimension"] if "split_dimension" in roi else None,
+                    )
+                    if self.__roi_is_not_empty(roi_to_split_in_voxels.roi):
+                        self.rois_to_split_in_voxels[roi_type].append(
+                            roi_to_split_in_voxels
+                        )
+                    else:
+                        warnings.warn(
+                            f"Empty roi {roi_to_split_in_voxels.roi*self.resolution}"
+                        )
 
     def __get_all_annotation_centers_voxels(self):
         # get all centers
         dfs = []
-        for annotation_csv in (
-            self.annotations_to_split_by_rois + self.annotations_to_split_automatically
-        ):
+        for annotation_csv in self.annotation_csvs:
             dfs.append(pd.read_csv(annotation_csv))
         df = pd.concat(dfs)
         (
@@ -84,55 +123,18 @@ class RoiSplitter:
         )
         return len(valid_centers) > 0
 
-    def __get_roi_from_yml(self, yml_path):
-        rois_to_split_in_voxels = []
-        if yml_path:
-            with open(yml_path, "r") as stream:
-                yml = yaml.safe_load(stream)
-            for roi in yml["rois"]:
-                roi_start = np.zeros((3, 1))
-                roi_end = np.zeros((3, 1))
-                for idx, dim in enumerate(["z", "y", "x"]):
-                    dim_start, dim_end = roi[dim].split("-")
-                    roi_start[idx] = int(dim_start)
-                    roi_end[idx] = int(dim_end)
-                roi_to_split_in_voxels = RoiToSplitInVoxels(
-                    roi_start,
-                    roi_end,
-                    self.resolution,
-                    roi["split_dimension"] if "split_dimension" in roi else None,
-                )
+    def __get_roi_to_split_from_annotation_csv(self, annotation_csv):
+        df = pd.read_csv(annotation_csv)
+        (
+            annotation_starts,
+            annotation_ends,
+            _,
+        ) = self.__get_annotation_start_end_center_voxels(df)
 
-                if self.__roi_is_not_empty(roi_to_split_in_voxels.roi):
-                    rois_to_split_in_voxels.append(roi_to_split_in_voxels)
-                else:
-                    warnings.warn(
-                        f"Empty roi {rois_to_split_in_voxels.roi*self.resolution}"
-                    )
-        return rois_to_split_in_voxels
-
-    def __get_rois_to_split(self):
-        self.validation_test_rois_to_split_in_voxels = self.__get_roi_from_yml(
-            self.validation_test_rois_to_split_yml
-        )
-        self.training_validation_test_rois_to_split_in_voxels = self.__get_roi_from_yml(
-            self.training_validation_test_rois_to_split_yml
-        )
-
-        for annotation_csv in self.annotations_to_split_automatically:
-            df = pd.read_csv(annotation_csv)
-            (
-                annotation_starts,
-                annotation_ends,
-                _,
-            ) = self.__get_annotation_start_end_center_voxels(df)
-
-            annotation_endpoints = np.concatenate((annotation_starts, annotation_ends))
-            roi_start = np.ceil(np.min(annotation_endpoints, axis=0)).astype(int)
-            roi_end = np.floor(np.max(annotation_endpoints, axis=0)).astype(int)
-            self.training_validation_test_rois_to_split_in_voxels.append(
-                RoiToSplitInVoxels(roi_start, roi_end, resolution=1)
-            )
+        annotation_endpoints = np.concatenate((annotation_starts, annotation_ends))
+        roi_start = np.ceil(np.min(annotation_endpoints, axis=0)).astype(int)
+        roi_end = np.floor(np.max(annotation_endpoints, axis=0)).astype(int)
+        return RoiToSplitInVoxels(roi_start, roi_end, resolution=1)
 
     def __get_valid_centers(self, roi: Roi, annotation_centers):
         # check annotation centers are within region
@@ -282,7 +284,7 @@ class RoiSplitter:
         training_split_ratio=0.75 / 0.25,
         validation_test_split_ratio=1,
     ):
-        for roi_to_split in self.training_validation_test_rois_to_split_in_voxels:
+        for roi_to_split in self.rois_to_split_in_voxels["training_validation_test"]:
             (
                 best_training_roi,
                 best_validation_roi,
@@ -297,8 +299,8 @@ class RoiSplitter:
             self.rois_dict["validation"].append(best_validation_roi * self.resolution)
             self.rois_dict["test"].append(best_test_roi * self.resolution)
 
-        for roi_to_split in self.validation_test_rois_to_split_in_voxels:
-            if roi_to_split.split_dimension == "don't split":
+        for roi_to_split in self.rois_to_split_in_voxels["validation_test"]:
+            if roi_to_split.split_dimension == "do_not_split":
                 # then it was deemed too small to split so we just use it as validation
                 best_validation_roi = roi_to_split.roi
             else:
