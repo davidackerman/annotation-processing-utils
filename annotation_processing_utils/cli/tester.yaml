@@ -1,0 +1,11 @@
+runs: 
+  - finetuned_3d_lsdaffs_weight_ratio_0.50_plasmodesmata_pseudorandom_training_centers_maxshift_18_more_annotations_unet_default_v2_no_dataset_predictor_node_lr_5E-5__1
+iterations: [200000, 200000, 200000]
+analysis_info:
+  - training_validation_test_roi_yaml: /groups/cellmap/cellmap/ackermand/Programming/plasmodesmata_dacapo/preprocessing/annotations/jrc_22ak351-leaf-3r/training_validation_test_roi_info.yaml
+    raw_path: /nrs/cellmap/data/jrc_22ak351-leaf-3r/jrc_22ak351-leaf-3r.n5/em/fibsem-uint8/s0
+    gt_path: /nrs/cellmap/ackermand/cellmap/plasmodesmata/annotations_as_cylinders.n5/jrc_22ak351-leaf-3r
+    mask_path: /nrs/cellmap/ackermand/cellmap/leaf-gall/prediction_masks.zarr/dilation_iterations_3_jrc_22ak351-leaf-3r
+    inference_base_path: /nrs/cellmap/ackermand/predictions/jrc_22ak351-leaf-3r/jrc_22ak351-leaf-3r.n5
+    metrics_base_path: /nrs/cellmap/ackermand/validation_and_testing_scores/jrc_22ak351-leaf-3r
+postprocessing_suffixes: [_filter_val_0.5_lrb_ratio_-0.08_adj_0.5_lr_-1.2]
