@@ -13,5 +13,17 @@ description = "Utils for processing neuroglancer annotations"
 readme = "README.md"
 license = {file = "LICENSE.txt"}
 
-[project.entry-points."spam.magical"]
-tomatoes = "src:annotation_processing_utils"
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+exclude = ["ignore"]
+
+[project.scripts]
+run-inference = "annotation_processing_utils.cli.runners:run_inference"
+run-mws = "annotation_processing_utils.cli.runners:run_mws"
+run-metrics = "annotation_processing_utils.cli.runners:run_metrics"
+submit-inference = "annotation_processing_utils.cli.cluster_submission:submit_inference"
+submit-mws = "annotation_processing_utils.cli.cluster_submission:submit_mws"
+submit-metrics = "annotation_processing_utils.cli.cluster_submission:submit_metrics"
