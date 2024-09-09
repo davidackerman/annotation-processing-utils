@@ -10,7 +10,7 @@ logger: logging.Logger = logging.getLogger(name=__name__)
 
 
 def run_inference():
-    from annotation_processing_utils.postprocessing.inference import inference
+    from annotation_processing_utils.postprocess.inference import inference
     from funlib.geometry import Roi
 
     parser = argparse.ArgumentParser(
@@ -50,7 +50,7 @@ def run_inference():
 
 
 def run_mws():
-    from annotation_processing_utils.postprocessing.mws import mws
+    from annotation_processing_utils.postprocess.mws import mws
 
     parser = argparse.ArgumentParser(
         description="Run mutex watershed segmentation for an affinities dataset"
@@ -71,7 +71,7 @@ def run_mws():
 
 def run_metrics():
     from funlib.persistence import open_ds
-    from annotation_processing_utils.postprocessing.metrics import (
+    from annotation_processing_utils.postprocess.metrics import (
         InstanceSegmentationOverlapAndScorer,
     )
 

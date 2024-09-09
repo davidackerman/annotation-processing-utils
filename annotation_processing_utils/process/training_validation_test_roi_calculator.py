@@ -5,6 +5,11 @@ from funlib.geometry import Roi
 import numpy as np
 import pandas as pd
 
+import neuroglancer
+from neuroglancer.url_state import parse_url
+import pandas as pd
+import yaml
+import os
 from neuroglancer.write_annotations import AnnotationWriter
 from neuroglancer.coordinate_space import CoordinateSpace
 from neuroglancer import AnnotationPropertySpec
@@ -31,6 +36,9 @@ class TrainingValidationTestRoiCalculator:
         self,
         training_validation_test_roi_info_yaml,
     ):
+        self.training_validation_test_roi_info_yaml = (
+            training_validation_test_roi_info_yaml
+        )
         self.rois_dict = {"training": {}, "validation": {}, "test": {}}
         self.__extract_training_validation_test_info(
             training_validation_test_roi_info_yaml
@@ -61,9 +69,9 @@ class TrainingValidationTestRoiCalculator:
                         roi_name = roi_info["roi_name"]
                         annotation_csv = roi_info["annotation_csv"]
                         self.annotation_csvs.append(annotation_csv)
-                        self.rois_to_split_in_voxels[roi_type][
-                            roi_name
-                        ] = self.__get_roi_to_split_from_annotation_csv(annotation_csv)
+                        self.rois_to_split_in_voxels[roi_type][roi_name] = (
+                            self.__get_roi_to_split_from_annotation_csv(annotation_csv)
+                        )
         self.__get_all_annotation_centers_voxels()
 
         # rois
@@ -106,8 +114,8 @@ class TrainingValidationTestRoiCalculator:
             dfs.append(pd.read_csv(annotation_csv))
         df = pd.concat(dfs)
         (
-            _,
-            _,
+            self.all_annotation_starts_voxels,
+            self.all_annotation_ends_voxels,
             self.all_annotation_centers_voxels,
         ) = self.__get_annotation_start_end_center_voxels(df)
 
@@ -125,10 +133,11 @@ class TrainingValidationTestRoiCalculator:
         return starts, ends, centers
 
     def __roi_is_not_empty(self, roi):
-        valid_centers = self.__get_valid_centers(
-            roi, self.all_annotation_centers_voxels
+        valid_annotations = self.__get_valid_annotations(
+            roi,
+            self.all_annotation_centers_voxels,
         )
-        return len(valid_centers) > 0
+        return np.sum(valid_annotations) > 0
 
     def __get_roi_to_split_from_annotation_csv(self, annotation_csv):
         df = pd.read_csv(annotation_csv)
@@ -143,8 +152,9 @@ class TrainingValidationTestRoiCalculator:
         roi_end = np.floor(np.max(annotation_endpoints, axis=0)).astype(int)
         return RoiToSplitInVoxels(roi_start, roi_end, resolution=1)
 
-    def __get_valid_centers(self, roi: Roi, annotation_centers):
-        # check annotation centers are within region
+    def __get_valid_annotations(self, roi: Roi, annotation_centers):
+        # check annotations are within region
+
         valid_annotations = (
             (annotation_centers[:, 0] >= roi.begin[0])
             & (annotation_centers[:, 0] <= roi.end[0])
@@ -153,22 +163,28 @@ class TrainingValidationTestRoiCalculator:
             & (annotation_centers[:, 2] >= roi.begin[2])
             & (annotation_centers[:, 2] <= roi.end[2])
         )
-        return annotation_centers[valid_annotations]
+        return valid_annotations
 
     def __get_minimal_bounding_roi(
         self,
         roi: Roi,
+        annotation_starts,
         annotation_centers,
+        annotation_ends,
     ):
         # find minimum box coordinates that keep the same centers
-        valid_centers = self.__get_valid_centers(roi, annotation_centers)
+        valid_annotations = self.__get_valid_annotations(roi, annotation_centers)
+        valid_starts = annotation_starts[valid_annotations]
+        valid_ends = annotation_ends[valid_annotations]
+        valid_endpoints = np.concatenate((valid_starts, valid_ends))
+
         roi_start = np.maximum(
             np.array(roi.begin),
-            np.floor(np.min(valid_centers, axis=0)).astype(int),
+            np.floor(np.min(valid_endpoints, axis=0)).astype(int),
         )
         roi_end = np.minimum(
             np.array(roi.end),
-            np.ceil(np.max(valid_centers, axis=0)).astype(int),
+            np.ceil(np.max(valid_endpoints, axis=0)).astype(int),
         )
         return Roi(roi_start, roi_end - roi_start)
 
@@ -178,7 +194,9 @@ class TrainingValidationTestRoiCalculator:
     def __split_roi_along_axis(
         self,
         roi: Roi,
+        annotation_starts,
         annotation_centers,
+        annotation_ends,
         split_dimension,
         desired_ratio=0.5,
     ):
@@ -186,15 +204,17 @@ class TrainingValidationTestRoiCalculator:
         second_roi_start = np.array(roi.begin)
         best_score = np.inf
 
-        valid_centers = self.__get_valid_centers(roi, annotation_centers)
+        valid_annotations = self.__get_valid_annotations(roi, annotation_centers)
+        valid_centers = annotation_centers[valid_annotations]
 
         num_kept_annotations = 0
+        longest_box_diagonal = np.ceil(np.sqrt(3 * 36**2) + 1)
         for roi_split in range(roi.begin[split_dimension], roi.end[split_dimension]):
             annotations_in_first_half = np.sum(
                 valid_centers[:, split_dimension] < roi_split
             )
             annotations_in_second_half = np.sum(
-                valid_centers[:, split_dimension] >= (roi_split + 145)
+                valid_centers[:, split_dimension] >= (roi_split + longest_box_diagonal)
             )
             if annotations_in_second_half > 0:
                 ratio = annotations_in_first_half / annotations_in_second_half
@@ -202,23 +222,33 @@ class TrainingValidationTestRoiCalculator:
                 if np.abs(desired_ratio - ratio) < best_score:
                     best_score = np.abs(desired_ratio - ratio)
                     first_roi_end[split_dimension] = roi_split
-                    second_roi_start[split_dimension] = roi_split + 145
+                    second_roi_start[split_dimension] = roi_split + longest_box_diagonal
                     num_kept_annotations = (
                         annotations_in_first_half + annotations_in_second_half
                     )
+        first_roi = self.__roi_from_bounding_box(roi.begin, first_roi_end)
+        second_roi = self.__roi_from_bounding_box(second_roi_start, roi.end)
 
-        first_roi = self.__get_minimal_bounding_roi(
-            self.__roi_from_bounding_box(roi.begin, first_roi_end), annotation_centers
-        )
-        second_roi = self.__get_minimal_bounding_roi(
-            self.__roi_from_bounding_box(second_roi_start, roi.end), annotation_centers
-        )
+        # first_roi = self.__get_minimal_bounding_roi(
+        #     self.__roi_from_bounding_box(roi.begin, first_roi_end),
+        #     annotation_starts,
+        #     annotation_centers,
+        #     annotation_ends,
+        # )
+        # second_roi = self.__get_minimal_bounding_roi(
+        #     self.__roi_from_bounding_box(second_roi_start, roi.end),
+        #     annotation_starts,
+        #     annotation_centers,
+        #     annotation_ends,
+        # )
         return (num_kept_annotations, first_roi, second_roi)
 
     def split_validation_test_roi(
         self,
         validation_test_roi: Roi,
+        annotation_starts,
         annotation_centers,
+        annotation_ends,
         split_dimension=None,
         validation_test_split_ratio=1,
         max_num_kept_annotations=0,
@@ -238,7 +268,9 @@ class TrainingValidationTestRoiCalculator:
                 test_roi,
             ) = self.__split_roi_along_axis(
                 validation_test_roi,
+                annotation_starts,
                 annotation_centers,
+                annotation_ends,
                 split_dimension=current_split_dimension,
                 desired_ratio=validation_test_split_ratio,
             )
@@ -253,7 +285,9 @@ class TrainingValidationTestRoiCalculator:
     def split_training_validation_test_roi(
         self,
         training_validation_test_roi: Roi,
+        annotation_starts,
         annotation_centers,
+        annotation_ends,
         training_split_ratio=0.75 / 0.25,
         validation_test_split_ratio=1,
     ):
@@ -262,7 +296,9 @@ class TrainingValidationTestRoiCalculator:
         for first_split_dimension in [2, 1, 0]:
             _, training_roi, validation_test_roi = self.__split_roi_along_axis(
                 training_validation_test_roi,
+                annotation_starts,
                 annotation_centers,
+                annotation_ends,
                 first_split_dimension,
                 desired_ratio=training_split_ratio,
             )
@@ -273,7 +309,9 @@ class TrainingValidationTestRoiCalculator:
                 test_roi,
             ) = self.split_validation_test_roi(
                 validation_test_roi,
+                annotation_starts,
                 annotation_centers,
+                annotation_ends,
                 validation_test_split_ratio=validation_test_split_ratio,
                 max_num_kept_annotations=max_num_kept_annotations,
             )
@@ -300,7 +338,9 @@ class TrainingValidationTestRoiCalculator:
                 best_test_roi,
             ) = self.split_training_validation_test_roi(
                 roi_to_split.roi,
+                self.all_annotation_starts_voxels,
                 self.all_annotation_centers_voxels,
+                self.all_annotation_ends_voxels,
                 training_split_ratio,
                 validation_test_split_ratio,
             )
@@ -321,7 +361,9 @@ class TrainingValidationTestRoiCalculator:
             else:
                 _, best_validation_roi, best_test_roi = self.split_validation_test_roi(
                     roi_to_split.roi,
+                    self.all_annotation_starts_voxels,
                     self.all_annotation_centers_voxels,
+                    self.all_annotation_ends_voxels,
                     split_dimension=roi_to_split.split_dimension,
                     validation_test_split_ratio=validation_test_split_ratio,
                 )
@@ -375,7 +417,52 @@ class TrainingValidationTestRoiCalculator:
         )
 
         print(f"rois as annotations: {precomputed_path}")
+        self.rois_as_annotations = precomputed_path
+
+    def get_neuroglancer_link(self):
+        # load the roi yaml
+        with open(
+            self.training_validation_test_roi_info_yaml,
+            "r",
+        ) as f:
+            roi_info = yaml.safe_load(f)
+
+        viewer = neuroglancer.Viewer()
+        with viewer.txn() as s:
+            is_first = True
+            for split_type, csvs in roi_info["annotations"].items():
+                for csv in csvs:
+                    is_first = False
+                    df = pd.read_csv(csv)
+                    layer_name = (
+                        split_type + "_" + os.path.basename(csv).split(".csv")[0]
+                    )
+                    neuroglancer_url = df["neuroglancer url"][0]
+                    state = parse_url(neuroglancer_url)
+                    for layer in state.layers:
+                        if (
+                            layer.name == "fibsem-uint8"
+                            or layer.name == "raw"
+                            and is_first
+                        ):
+                            layer.name = "raw"
+                            s.layers["raw"] = layer
+                        if layer.name == "saved_annotations":
+                            layer.name = layer_name
+                            s.layers[layer_name] = layer
+
+            s.layers["rois"] = neuroglancer.AnnotationLayer(
+                source=self.rois_as_annotations,
+                shader="""
+                void main() {
+                    setColor(prop_box_color());
+                }
+                """,
+            )
+        self.neuroglancer_url = neuroglancer.to_url(viewer.state)
+        print(f"Neuroglancer view:\n{self.neuroglancer_url}")
 
     def standard_processing(self, output_directory):
         self.get_training_validation_test_rois()
         self.write_roi_annotations(output_directory)
+        self.get_neuroglancer_link()

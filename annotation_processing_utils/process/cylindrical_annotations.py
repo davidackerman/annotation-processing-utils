@@ -19,14 +19,11 @@ import json
 import pandas as pd
 from tqdm import tqdm
 import shutil
-from funlib.geometry import Roi
-
-from neuroglancer.write_annotations import AnnotationWriter
-from neuroglancer.coordinate_space import CoordinateSpace
-from neuroglancer import AnnotationPropertySpec
+from annotation_processing_utils.utils.bresenham3D import bresenham3DWithMask
 
 import warnings
 from .training_validation_test_roi_calculator import TrainingValidationTestRoiCalculator
+from funlib.persistence import open_ds, prepare_ds
 
 
 class VoxelNmConverter:
@@ -57,7 +54,8 @@ class CylindricalAnnotations:
         training_validation_test_roi_info_yaml,
         output_directory=None,
         mask_zarr=None,
-        output_n5=None,
+        output_zarr=None,
+        training_points_zarr=None,
         dataset="jrc_22ak351-leaf-3m",
     ):
         np.random.seed(0)  # set seed for consistency of locations
@@ -67,21 +65,25 @@ class CylindricalAnnotations:
 
         if not mask_zarr:
             mask_zarr = f"/nrs/cellmap/{self.username}/cellmap/{self.annotation_name}/annotation_intersection_masks.zarr"
-        if not output_n5:
-            output_n5 = f"/nrs/cellmap/{self.username}/cellmap/{self.annotation_name}/annotations_as_cylinders.n5"
+        if not output_zarr:
+            output_zarr = f"/nrs/cellmap/{self.username}/cellmap/{self.annotation_name}/annotations_as_cylinders.zarr"
+        if not training_points_zarr:
+            training_points_zarr = f"/nrs/cellmap/{self.username}/cellmap/{self.annotation_name}/training_points.zarr"
         if not output_directory:
             output_directory = f"/groups/cellmap/cellmap/{self.username}/neuroglancer_annotations/{self.annotation_name}/{self.dataset}"
 
-        raw_n5 = f"/nrs/cellmap/data/{self.dataset}/{self.dataset}.n5"
-        if "em" in os.listdir(raw_n5):
-            raw_dataset_name = "em/fibsem-uint8/s0"
-        else:
-            raw_dataset_name = "volumes/raw/s0"
-        zarr_file = zarr.open(raw_n5, mode="r")
-        self.raw_dataset = zarr_file[raw_dataset_name]
+        raw_zarr = f"/nrs/cellmap/data/{self.dataset}/{self.dataset}.zarr"
+        if "em" in os.listdir(raw_zarr):
+            raw_dataset_name = "/em/fibsem-uint8/s0"
+        elif "volumes" in os.listdir(raw_zarr):
+            raw_dataset_name = "/volumes/raw/s0"
+        elif "recon-1":
+            raw_dataset_name = "/recon-1/em/fibsem-uint8/s0"
+        self.raw_dataset = open_ds(raw_zarr, raw_dataset_name)
 
         self.mask_zarr = mask_zarr
-        self.output_n5 = output_n5
+        self.output_zarr = output_zarr
+        self.training_points_zarr = training_points_zarr
         self.output_directory = output_directory
         self.empty_annotations = []
         self.radius = radius
@@ -92,6 +94,9 @@ class CylindricalAnnotations:
         self.roi_calculator.standard_processing(output_directory)
 
     def in_cylinder(self, end_1, end_2, radius):
+        # subtract 0.5 so that an annotation centered at a voxel matches to eg 0,0,0
+        end_2 = end_2 - 0.5
+        end_1 = end_1 - 0.5
         # https://stackoverflow.com/questions/56463412/distance-from-a-point-to-a-line-segment-in-3d-python
         # normalized tangent vector
         d = np.divide(end_2 - end_1, np.linalg.norm(end_2 - end_1))
@@ -121,23 +126,33 @@ class CylindricalAnnotations:
         return set(map(tuple, p[is_in_cylinder]))
 
     def extract_annotation_information(self):
-        self.resolution = np.array(
-            self.raw_dataset.attrs.asdict()["transform"]["scale"]
-        )
+        self.voxel_size = self.raw_dataset.voxel_size
+
         # https://cell-map.slack.com/archives/C04N9JUFQK1/p1683733456153269
 
         dfs = []
         for annotation_csv in self.roi_calculator.annotation_csvs:
             dfs.append(pd.read_csv(annotation_csv))
         df = pd.concat(dfs)
+        # remove duplicate rows from dataframe
+        df = df.drop_duplicates(
+            subset=[
+                "start z (nm)",
+                "start y (nm)",
+                "start x (nm)",
+                "end z (nm)",
+                "end y (nm)",
+                "end x (nm)",
+            ]
+        )
 
         self.annotation_starts = (
             np.array([df["start z (nm)"], df["start y (nm)"], df["start x (nm)"]]).T
-            / self.resolution[0]
+            / self.voxel_size[0]
         )
         self.annotation_ends = (
             np.array([df["end z (nm)"], df["end y (nm)"], df["end x (nm)"]]).T
-            / self.resolution[0]
+            / self.voxel_size[0]
         )
 
     def get_negative_examples(filename="annotations_20230620_221638.csv"):
@@ -170,7 +185,7 @@ class CylindricalAnnotations:
 
     def write_annotations_as_cylinders_and_get_intersections(self, radius):
         # get all pd voxels and all overlapping/intersecting voxels between multiple pd
-        all_annotation_voxels_set = set()
+        self.all_annotation_voxels_set = set()
         self.intersection_voxels_set = set()
         for annotation_start, annotation_end in tqdm(
             zip(self.annotation_starts, self.annotation_ends),
@@ -180,31 +195,25 @@ class CylindricalAnnotations:
                 annotation_start, annotation_end, radius=radius
             )
             self.intersection_voxels_set.update(
-                all_annotation_voxels_set.intersection(voxels_in_cylinder)
+                self.all_annotation_voxels_set.intersection(voxels_in_cylinder)
             )
-            all_annotation_voxels_set.update(voxels_in_cylinder)
+            self.all_annotation_voxels_set.update(voxels_in_cylinder)
 
         # repeat but now will write out the relevant voxels with appropriate id
-        store = zarr.N5Store(self.output_n5)
-        zarr_root = zarr.group(store=store)
-        ds = zarr_root.create_dataset(
-            name=self.dataset,
-            dtype="u2",  # need to do this, right now it is doing it as floats
-            shape=self.raw_dataset.shape,
-            chunks=128,
-            write_empty_chunks=False,
-            compressor=GZip(level=6),
-            overwrite=True,
+        ds = prepare_ds(
+            filename=self.output_zarr,
+            ds_name=self.dataset,
+            dtype="u2",
+            voxel_size=self.voxel_size,
+            total_roi=self.raw_dataset.roi,
+            write_size=self.voxel_size * 128,
+            force_exact_write_size=True,
+            delete=True,
         )
-        attributes = ds.attrs
-        attributes["pixelResolution"] = {
-            "dimensions": 3 * [self.resolution[0]],
-            "unit": "nm",
-        }
 
         all_annotation_id = 1
         annotation_id = 1
-        all_annotation_voxels_set -= self.intersection_voxels_set
+        # self.all_annotation_voxels_set -= self.intersection_voxels_set
         for annotation_start, annotation_end in tqdm(
             zip(self.annotation_starts, self.annotation_ends),
             total=len(self.annotation_starts),
@@ -215,7 +224,7 @@ class CylindricalAnnotations:
             )
             if len(voxels_in_cylinder) > 0:
                 voxels_in_cylinder = np.array(list(voxels_in_cylinder))
-                ds[
+                ds.data[
                     voxels_in_cylinder[:, 0],
                     voxels_in_cylinder[:, 1],
                     voxels_in_cylinder[:, 2],
@@ -230,35 +239,59 @@ class CylindricalAnnotations:
                 )
 
     def write_intersection_mask(self):
-        zarr_path = self.mask_zarr
-        if not os.path.exists(zarr_path):
-            zarr_root = zarr.open(zarr_path, mode="w")
-        else:
-            zarr_root = zarr.open(zarr_path, mode="r+")
-        ds = zarr_root.create_dataset(
-            overwrite=True,
-            name=self.dataset,
+        prepare_ds(
+            filename=self.mask_zarr,
+            ds_name=self.dataset,
             dtype="u1",
-            fill_value=1,
-            shape=self.raw_dataset.shape,
-            chunks=128,
-            write_empty_chunks=False,
-            compressor=GZip(level=6),
+            voxel_size=self.voxel_size,
+            total_roi=self.raw_dataset.roi,
+            write_size=self.voxel_size * 128,
+            force_exact_write_size=True,
+            delete=True,
         )
-        attributes = ds.attrs
-        attributes["pixelResolution"] = {
-            "dimensions": 3 * [self.resolution[0]],
-            "unit": "nm",
-        }
+        zarray_metadata_path = f"{self.mask_zarr}/{self.dataset}/.zarray"
+        # Load the .zarray metadata
+        with open(zarray_metadata_path, "r") as f:
+            zarray_metadata = json.load(f)
+
+        zarray_metadata["fill_value"] = 1
+
+        # Save the updated metadata back to the .zarray file
+        with open(zarray_metadata_path, "w") as f:
+            json.dump(zarray_metadata, f, indent=4)
+
+        ds = open_ds(self.mask_zarr, self.dataset, mode="a")
+
         intersection_voxels = np.array(list(self.intersection_voxels_set))
         if len(intersection_voxels) > 0:
-            ds[
+            ds.data[
                 intersection_voxels[:, 0],
                 intersection_voxels[:, 1],
                 intersection_voxels[:, 2],
             ] = 0
 
-    def remove_validation_or_test_annotations_from_training(self):
+    def write_training_points(self):
+        ds = prepare_ds(
+            filename=self.training_points_zarr,
+            ds_name=self.dataset,
+            dtype="u1",
+            voxel_size=self.voxel_size,
+            total_roi=self.raw_dataset.roi,
+            write_size=self.voxel_size * 128,
+            force_exact_write_size=True,
+            delete=True,
+        )
+        # convert list of training point tuples to numpy array
+
+        training_points_voxels = np.array(self.training_points) / self.voxel_size[0]
+        training_points_voxels = training_points_voxels.astype(int)
+        ds.data[
+            training_points_voxels[:, 0],
+            training_points_voxels[:, 1],
+            training_points_voxels[:, 2],
+        ] = 1
+
+    def get_pseudorandom_training_centers(self):
         def point_is_valid_center_for_current_roi(pt, edge_length, offset, shape):
             # a point is considered a valid center if the input bounding box for it does not cross the validation crop
             if np.all((pt + edge_length) >= offset) and np.all(
@@ -273,12 +306,12 @@ class CylindricalAnnotations:
                 self.roi_calculator.rois_dict["validation"].values()
             ) + list(self.roi_calculator.rois_dict["test"].values()):
                 roi = roi.snap_to_grid(
-                    3 * [self.resolution[0]],
+                    3 * [self.voxel_size[0]],
                     mode="shrink",
                 )
 
                 # do this to keep things in voxels for splitting along exact voxel
-                roi /= int(self.resolution[0])
+                roi /= int(self.voxel_size[0])
 
                 if not point_is_valid_center_for_current_roi(
                     pt, edge_length, roi.offset, roi.shape
@@ -293,7 +326,7 @@ class CylindricalAnnotations:
                 or point_is_valid_center(annotation_end, edge_length)
             )
 
-        self.pseudorandom_training_centers = []
+        self.training_points = []
         self.removed_ids = []
         for id, annotation_start, annotation_end in tqdm(
             zip(
@@ -332,8 +365,8 @@ class CylindricalAnnotations:
                     center = random_coordinate_along_annotation + np.random.randint(
                         low=-max_shift, high=max_shift, size=3
                     )
-                self.pseudorandom_training_centers.append(
-                    tuple(np.round(center * self.resolution[0]).astype(int))
+                self.training_points.append(
+                    tuple(np.round(center * self.voxel_size[0]).astype(int))
                 )
             else:
                 if annotation_length == 0:
@@ -341,10 +374,77 @@ class CylindricalAnnotations:
                 # c = np.round(((annotation_start + annotation_end) * self.resolution / 2)).astype(int)
                 self.removed_ids.append(id)
         print(
-            f"number of original centers: {len(self.annotation_starts)}, number of training centers: {len(self.pseudorandom_training_centers)}"
+            f"number of original centers: {len(self.annotation_starts)}, number of training centers: {len(self.training_points)}"
         )
         # if self.use_negative_examples:
         #     pseudorandom_training_centers += negative_example_centers
+
+    def get_central_axis_points_as_training_points(self):
+        def point_is_valid_for_current_roi(pt, min_distance, roi):
+            # a point is considered a valid center if the loss bounding box for it does not cross the validation crop
+            deltas = [
+                np.min([roi.begin[d] - pt[d], 0, pt[d] - roi.end[d]]) for d in range(3)
+            ]
+
+            return np.linalg.norm(deltas) > min_distance
+
+        def point_is_valid(pt, min_distance):
+            if pt not in self.all_annotation_voxels_set:
+                return False
+            for roi in list(
+                self.roi_calculator.rois_dict["validation"].values()
+            ) + list(self.roi_calculator.rois_dict["test"].values()):
+                roi = roi.snap_to_grid(
+                    3 * [self.voxel_size[0]],
+                    mode="shrink",
+                )
+
+                # do this to keep things in voxels for splitting along exact voxel
+                roi /= int(self.voxel_size[0])
+
+                if not point_is_valid_for_current_roi(pt, min_distance, roi):
+                    return False
+            return True
+
+        # 36x36x36 is shape of region used to caluclate loss,so we need to make sure that the center is at least the diagonal away from the validation/test rois
+        longest_box_diagonal = int(np.ceil(np.sqrt(3 * (36**2)))) + 1
+        self.training_points = []
+        self.removed_ids = []
+        for id, s, e in tqdm(
+            zip(
+                list(range(1, len(self.annotation_starts) + 1)),
+                self.annotation_starts,
+                self.annotation_ends,
+            ),
+            total=len(self.annotation_starts),
+        ):
+            s = np.floor(s)
+            e = np.floor(e)
+            annotation_length = np.linalg.norm(s - e)
+            if annotation_length == 0:
+                print(f"empty id {id} {s} {e}")
+                self.removed_ids.append(id)
+                continue
+
+            found_valid_point = False
+            line = bresenham3DWithMask(s[0], s[1], s[2], e[0], e[1], e[2])
+            for pt in line:
+                if point_is_valid(pt, longest_box_diagonal):
+                    self.training_points.append(
+                        tuple(np.round(np.array(pt) * self.voxel_size[0]).astype(int))
+                    )
+                    found_valid_point = True
+
+            if not found_valid_point:
+                self.removed_ids.append(id + 1)
+
+    def remove_validation_or_test_annotations_from_training(
+        self, deprecated_use_only_single_point=False
+    ):
+        if deprecated_use_only_single_point:
+            self.get_pseudorandom_training_centers()
+        else:
+            self.get_central_axis_points_as_training_points()
 
     def write_out_annotations(self, output_directory, annotation_ids):
         annotation_type = "line"
@@ -356,7 +456,7 @@ class CylindricalAnnotations:
 
         annotations = (
             np.column_stack((self.annotation_starts, self.annotation_ends))
-            * self.resolution[0]
+            * self.voxel_size[0]
         )
         annotations = np.array([annotations[id - 1, :] for id in annotation_ids])
         with open(f"{output_directory}/spatial0/0_0_0", "wb") as outfile:
@@ -412,7 +512,7 @@ class CylindricalAnnotations:
     def visualize_removed_annotations(self, roi, radius):
         def add_segmentation_layer(state, data, name):
             dimensions = neuroglancer.CoordinateSpace(
-                names=["z", "y", "x"], units="nm", scales=3 * [self.resolution[0]]
+                names=["z", "y", "x"], units="nm", scales=3 * [self.voxel_size[0]]
             )
             state.dimensions = dimensions
             state.layers.append(
@@ -423,7 +523,7 @@ class CylindricalAnnotations:
                     dimensions=neuroglancer.CoordinateSpace(
                         names=["z", "y", "x"],
                         units=["nm", "nm", "nm"],
-                        scales=3 * [self.resolution[0]],
+                        scales=3 * [self.voxel_size[0]],
                         coordinate_arrays=[
                             None,
                             None,
@@ -487,10 +587,16 @@ class CylindricalAnnotations:
         print(url)
 
     def standard_processing(self):
+        print("Extract information from annotations:")
         self.extract_annotation_information()
+        print("Write annotations as cylinders:")
         self.write_annotations_as_cylinders_and_get_intersections(radius=self.radius)
+        print("Write intersections mask:")
         self.write_intersection_mask()
+        print("Remove validation/test annotations from training:")
         self.remove_validation_or_test_annotations_from_training()
+        print("Write training points:")
+        self.write_training_points()
         if self.removed_ids:
             removed_annotations_dir = f"{self.output_directory}/removed_annotations"
             kept_annotations_dir = f"{self.output_directory}/kept_annotations"

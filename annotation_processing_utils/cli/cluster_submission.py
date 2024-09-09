@@ -8,7 +8,7 @@ import yaml
 # 	Try to import numpy first or set the threading layer accordingly. Set MKL_SERVICE_FORCE_INTEL to force it.
 # This happens if import torch happens after importing TrainingValidationTestRoiCalculator
 import torch
-from annotation_processing_utils.processing.training_validation_test_roi_calculator import (
+from annotation_processing_utils.process.training_validation_test_roi_calculator import (
     TrainingValidationTestRoiCalculator,
 )
 import getpass

@@ -3,7 +3,7 @@ import yaml
 import numpy as np
 from pathlib import Path
 
-from annotation_processing_utils.processing.training_validation_test_roi_calculator import (
+from annotation_processing_utils.process.training_validation_test_roi_calculator import (
     TrainingValidationTestRoiCalculator,
 )
 
