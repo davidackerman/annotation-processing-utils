@@ -43,6 +43,7 @@ class TrainingValidationTestRoiCalculator:
         self.__extract_training_validation_test_info(
             training_validation_test_roi_info_yaml
         )
+        neuroglancer.set_server_bind_address("0.0.0.0")
 
     def __extract_training_validation_test_info(
         self, training_validation_test_info_yaml
@@ -419,7 +420,7 @@ class TrainingValidationTestRoiCalculator:
         print(f"rois as annotations: {precomputed_path}")
         self.rois_as_annotations = precomputed_path
 
-    def get_neuroglancer_link(self):
+    def get_neuroglancer_url(self):
         # load the roi yaml
         with open(
             self.training_validation_test_roi_info_yaml,
@@ -465,4 +466,4 @@ class TrainingValidationTestRoiCalculator:
     def standard_processing(self, output_directory):
         self.get_training_validation_test_rois()
         self.write_roi_annotations(output_directory)
-        self.get_neuroglancer_link()
+        self.get_neuroglancer_url()
