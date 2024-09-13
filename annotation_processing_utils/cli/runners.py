@@ -9,6 +9,21 @@ import getpass
 logger: logging.Logger = logging.getLogger(name=__name__)
 
 
+def run_dacapo_train():
+    from dacapo.store.create_store import create_config_store
+    from dacapo.train import train_run
+    from dacapo.experiments.run import Run
+
+    parser = argparse.ArgumentParser(description="Run training via DaCapo")
+    parser.add_argument("--run", type=str, help="Name of the run", required=True)
+    args = parser.parse_args()
+
+    config_store = create_config_store()
+    run_config = config_store.retrieve_run_config(args.run)
+    run = Run(run_config)
+    train_run(run)
+
+
 def run_inference():
     from annotation_processing_utils.postprocess.inference import inference
     from funlib.geometry import Roi
@@ -54,12 +69,15 @@ def run_mws():
 
     parser = argparse.ArgumentParser(
         description="Run mutex watershed segmentation for an affinities dataset"
-
     )
-    parser.add_argument("--affinities_path", type=str, help="Path to the affinities", required=True)
     parser.add_argument(
-        "--segmentation_path", type=str, help="Output path for segmentations", required=True
-
+        "--affinities_path", type=str, help="Path to the affinities", required=True
+    )
+    parser.add_argument(
+        "--segmentation_path",
+        type=str,
+        help="Output path for segmentations",
+        required=True,
     )
 
     args = parser.parse_args()
@@ -78,8 +96,12 @@ def run_metrics():
     parser = argparse.ArgumentParser(
         description="Run instance segmentation metrics for a particular ground truth and test dataset"
     )
-    parser.add_argument("--gt_path", type=str, help="Path to the ground truth data",required=True)
-    parser.add_argument("--test_path", type=str, help="Path to the test data",required=True)
+    parser.add_argument(
+        "--gt_path", type=str, help="Path to the ground truth data", required=True
+    )
+    parser.add_argument(
+        "--test_path", type=str, help="Path to the test data", required=True
+    )
     parser.add_argument(
         "--mask_path",
         type=str,
@@ -87,11 +109,11 @@ def run_metrics():
         required=False,
         default=None,
     )
-    parser.add_argument("--metrics_path", type=str, help="Path for the output metrics",required=True)
     parser.add_argument(
-        "--num_workers",
-        type=int,
-        help="Number of compute workers", required=True
+        "--metrics_path", type=str, help="Path for the output metrics", required=True
+    )
+    parser.add_argument(
+        "--num_workers", type=int, help="Number of compute workers", required=True
     )
 
     args = parser.parse_args()

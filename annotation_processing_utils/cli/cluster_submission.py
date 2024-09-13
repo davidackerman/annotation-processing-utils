@@ -21,14 +21,31 @@ def get_arguments_per_submission(submision_yaml_path, submission_type):
         submission_info = yaml.safe_load(stream)
     yaml_name = Path(submision_yaml_path).stem
 
+    timestamp = datetime.now().strftime(f"%Y%m%d/%H%M%S/")
+    arguments_per_submission = []
+
     runs = submission_info["runs"]
+
+    log_base_path = f"/nrs/cellmap/{username}/logs/{yaml_name}"
+    if submission_type == "dacapo-train":
+        for run in runs:
+            log_path = Path(f"{log_base_path}/{submission_type}/{run}/{timestamp}")
+            arguments_per_submission.append(
+                bsub_formatter(
+                    {
+                        "--run": run,
+                        "bsub_args": "bsub -P cellmap -q gpu_h100 -n 20 -gpu num=1",
+                        "log_path": log_path,
+                    },
+                    submission_type,
+                )
+            )
+        return arguments_per_submission
+
+    log_base_path = f"/nrs/cellmap/{username}/logs/{yaml_name}/{timestamp}"
     analysis_info = submission_info["analysis_info"]
     iterations_start, iterations_end, iterations_step = submission_info["iterations"]
     postprocessing_suffixes = submission_info["postprocessing_suffixes"]
-    arguments_per_submission = []
-
-    timestamp = datetime.now().strftime(f"%Y%m%d/%H%M%S/")
-    log_base_path = f"/nrs/cellmap/{username}/logs/{yaml_name}/{timestamp}"
     for current_analysis_info in analysis_info:
         analysis_info_name = current_analysis_info["name"]
         raw_path = current_analysis_info["raw_path"]
@@ -186,3 +203,7 @@ def submit_mws():
 
 def submit_metrics():
     generic_submitter("metrics")
+
+
+def submit_dacapo_train():
+    generic_submitter("dacapo-train")
