@@ -60,10 +60,10 @@ class CylindricalAnnotations:
         organelle,
         radius,
         training_validation_test_roi_info_yaml,
-        output_directory=None,
-        mask_zarr=None,
-        gt_zarr=None,
-        training_points_zarr=None,
+        output_annotations_directory=None,
+        output_mask_zarr=None,
+        output_gt_zarr=None,
+        output_training_points_zarr=None,
         dataset="jrc_22ak351-leaf-3m",
         training_point_selection_mode="all",
     ):
@@ -72,14 +72,14 @@ class CylindricalAnnotations:
         self.organelle = organelle
         self.dataset = dataset
 
-        if not mask_zarr:
-            mask_zarr = f"/nrs/cellmap/{self.username}/cellmap/{self.organelle}/annotation_intersection_masks.zarr"
-        if not gt_zarr:
-            gt_zarr = f"/nrs/cellmap/{self.username}/cellmap/{self.organelle}/annotations_as_cylinders.zarr"
-        if not training_points_zarr:
-            training_points_zarr = f"/nrs/cellmap/{self.username}/cellmap/{self.organelle}/training_points.zarr"
-        if not output_directory:
-            output_directory = f"/groups/cellmap/cellmap/{self.username}/neuroglancer_annotations/{self.organelle}/{self.dataset}"
+        if not output_mask_zarr:
+            output_mask_zarr = f"/nrs/cellmap/{self.username}/cellmap/{self.organelle}/annotation_intersection_masks.zarr"
+        if not output_gt_zarr:
+            output_gt_zarr = f"/nrs/cellmap/{self.username}/cellmap/{self.organelle}/annotations_as_cylinders.zarr"
+        if not output_training_points_zarr:
+            output_training_points_zarr = f"/nrs/cellmap/{self.username}/cellmap/{self.organelle}/training_points.zarr"
+        if not output_annotations_directory:
+            output_annotations_directory = f"/groups/cellmap/cellmap/{self.username}/neuroglancer_annotations/{self.organelle}/{self.dataset}"
 
         raw_zarr = f"/nrs/cellmap/data/{self.dataset}/{self.dataset}.zarr"
         if "em" in os.listdir(raw_zarr):
@@ -90,17 +90,17 @@ class CylindricalAnnotations:
             raw_dataset_name = "/recon-1/em/fibsem-uint8/s0"
         self.raw_dataset = open_ds(raw_zarr, raw_dataset_name)
 
-        self.mask_zarr = mask_zarr
-        self.gt_zarr = gt_zarr
-        self.training_points_zarr = training_points_zarr
-        self.output_directory = output_directory
+        self.output_mask_zarr = output_mask_zarr
+        self.output_gt_zarr = output_gt_zarr
+        self.output_training_points_zarr = output_training_points_zarr
+        self.output_annotations_directory = output_annotations_directory
         self.empty_annotations = []
         self.radius = radius
 
         self.roi_calculator = TrainingValidationTestRoiCalculator(
             training_validation_test_roi_info_yaml
         )
-        self.roi_calculator.standard_processing(output_directory)
+        self.roi_calculator.standard_processing(output_annotations_directory)
         self.training_point_selection_mode = training_point_selection_mode
 
         # 36x36x36 is shape of region used to caluclate loss,so we need to make sure that the center is at least the diagonal away from the validation/test rois
@@ -219,7 +219,7 @@ class CylindricalAnnotations:
 
         # repeat but now will write out the relevant voxels with appropriate id
         ds = create_multiscale_dataset(
-            output_path=f"{self.gt_zarr}/{self.dataset}",
+            output_path=f"{self.output_gt_zarr}/{self.dataset}",
             dtype="u2",
             voxel_size=self.voxel_size,
             total_roi=self.raw_dataset.roi,
@@ -256,14 +256,14 @@ class CylindricalAnnotations:
 
     def write_intersection_mask(self):
         create_multiscale_dataset(
-            output_path=f"{self.mask_zarr}/{self.dataset}",
+            output_path=f"{self.output_mask_zarr}/{self.dataset}",
             dtype="u1",
             voxel_size=self.voxel_size,
             total_roi=self.raw_dataset.roi,
             write_size=self.voxel_size * 128,
             delete=True,
         )
-        zarray_metadata_path = f"{self.mask_zarr}/{self.dataset}/s0/.zarray"
+        zarray_metadata_path = f"{self.output_mask_zarr}/{self.dataset}/s0/.zarray"
         # Load the .zarray metadata
         with open(zarray_metadata_path, "r") as f:
             zarray_metadata = json.load(f)
@@ -274,7 +274,7 @@ class CylindricalAnnotations:
         with open(zarray_metadata_path, "w") as f:
             json.dump(zarray_metadata, f, indent=4)
 
-        ds = open_ds(self.mask_zarr, self.dataset + "/s0", mode="a")
+        ds = open_ds(self.output_mask_zarr, self.dataset + "/s0", mode="a")
 
         intersection_voxels = np.array(list(self.intersection_voxels_set))
         if len(intersection_voxels) > 0:
@@ -286,7 +286,7 @@ class CylindricalAnnotations:
 
     def write_training_points(self):
         ds = create_multiscale_dataset(
-            output_path=f"{self.training_points_zarr}/{self.dataset}",
+            output_path=f"{self.output_training_points_zarr}/{self.dataset}",
             dtype="u1",
             voxel_size=self.voxel_size,
             total_roi=self.raw_dataset.roi,
@@ -681,7 +681,7 @@ class CylindricalAnnotations:
         state = parse_url(self.roi_calculator.neuroglancer_url)
         for name, zarr_path in zip(
             ["mask", "annotations_as_cylinders", "training_points"],
-            [self.mask_zarr, self.gt_zarr, self.training_points_zarr],
+            [self.output_mask_zarr, self.output_gt_zarr, self.output_training_points_zarr],
         ):
             zarr_path = (
                 zarr_path.replace("/nrs/cellmap", "nrs/")
@@ -695,10 +695,10 @@ class CylindricalAnnotations:
         if len(self.removed_ids):
             print(f"{len(self.removed_ids)=}")
             state.layers["removed_annotations"] = neuroglancer.AnnotationLayer(
-                source=f"{self.output_directory}/removed_annotations"
+                source=f"{self.output_annotations_directory}/removed_annotations"
             )
             state.layers["kept_annotations"] = neuroglancer.AnnotationLayer(
-                source=f"{self.output_directory}/kept_annotations"
+                source=f"{self.output_annotations_directory}/kept_annotations"
             )
         print(f"Neuroglancer url:\n{neuroglancer.to_url(state)}")
 
@@ -717,19 +717,19 @@ class CylindricalAnnotations:
         self.write_training_points()
 
         if self.removed_ids:
-            removed_annotations_dir = f"{self.output_directory}/removed_annotations"
-            kept_annotations_dir = f"{self.output_directory}/kept_annotations"
+            removed_annotations_dir = f"{self.output_annotations_directory}/removed_annotations"
+            kept_annotations_dir = f"{self.output_annotations_directory}/kept_annotations"
 
             for annotations_dir in [removed_annotations_dir, kept_annotations_dir]:
                 if os.path.isdir(annotations_dir):
                     shutil.rmtree(annotations_dir)
 
             self.write_out_annotations(
-                output_directory=f"{self.output_directory}/removed_annotations",
+                output_directory=f"{self.output_annotations_directory}/removed_annotations",
                 annotation_ids=self.removed_ids,
             )
             self.write_out_annotations(
-                output_directory=f"{self.output_directory}/kept_annotations",
+                output_directory=f"{self.output_annotations_directory}/kept_annotations",
                 annotation_ids=[
                     id
                     for id in range(1, len(self.annotation_starts) + 1)
@@ -757,8 +757,8 @@ class CylindricalAnnotations:
         DacapoRunBuilder(
             self.dataset,
             self.organelle,
-            mask_zarr=self.mask_zarr,
-            gt_zarr=self.gt_zarr,
+            mask_zarr=self.output_mask_zarr,
+            gt_zarr=self.output_gt_zarr,
             training_points=self.training_points,
             training_point_selection_mode=self.training_point_selection_mode,
             validation_rois_dict=self.roi_calculator.rois_dict["validation"],
