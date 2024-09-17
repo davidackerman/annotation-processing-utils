@@ -80,11 +80,15 @@ def run_mws():
         required=True,
     )
 
-    args = parser.parse_args()
-    mws(
-        args.affinities_path,
-        args.segmentation_path,
+    parser.add_argument(
+        "--mask_path",
+        default=None,
+        type=str,
+        help="Mask if applicable (where a 0 indicates a region to ignore)",
+        required=False,
     )
+    args = parser.parse_args()
+    mws(args.affinities_path, args.segmentation_path, args.mask_path)
 
 
 def run_metrics():

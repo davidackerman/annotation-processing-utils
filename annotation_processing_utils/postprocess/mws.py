@@ -8,12 +8,15 @@ logger: logging.Logger = logging.getLogger(name=__name__)
 import getpass
 
 
-def mws(
-    affinities_path: str,
-    segmentation_path: str,
-):
+def mws(affinities_path: str, segmentation_path: str, mask_path: str = None):
     affinities_file, affinities_dataset = parse_data_path(affinities_path)
     output_file, output_dataset = parse_data_path(segmentation_path)
+    if mask_path is not None:
+        mask_file, mask_dataset = parse_data_path(mask_path)
+    else:
+        mask_file = None
+        mask_dataset = None
+
     username = getpass.getuser()
     for adj_bias, lr_bias in [(0.5, -1.2)]:  # ,(0.1,-1.2)]:
         filter_val = 0.5
@@ -28,14 +31,16 @@ def mws(
             fragments_dataset=f"{output_dataset}_filter_val_{filter_val}_lrb_ratio_{lr_bias_ratio}_adj_{adj_bias}_lr_{lr_bias}_frags",
             seg_file=output_file,
             seg_dataset=f"{output_dataset}_filter_val_{filter_val}_lrb_ratio_{lr_bias_ratio}_adj_{adj_bias}_lr_{lr_bias}_segs",
-            db_host="mongodb://microdosingAdmin:Cu2CO3OH2@funke-mongodb2.int.janelia.org:27017",
-            db_name=f"rusty_mws_{username}",
+            db_host="mongodb://cellmapAdmin:LUwWXkSY8N3AqCcw@cellmap-mongo.int.janelia.org:27017",
+            db_name=f"cellmap_postprocessing_{username}",
             lr_bias_ratio=lr_bias_ratio,
             adj_bias=adj_bias,
             lr_bias=lr_bias,
-            nworkers_frags=44,
-            nworkers_lut=44,
-            nworkers_supervox=44,
+            mask_file=mask_file,
+            mask_dataset=mask_dataset,
+            nworkers_frags=62,
+            nworkers_lut=62,
+            nworkers_supervox=62,
             filter_val=filter_val,
             neighborhood=[
                 [1, 0, 0],
