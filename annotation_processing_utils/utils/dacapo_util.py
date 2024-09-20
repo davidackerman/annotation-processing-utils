@@ -33,7 +33,8 @@ class DacapoRunBuilder:
         training_points,
         training_point_selection_mode,
         validation_rois_dict,
-        lr=5e-5,
+        base_lr=2.5e-5,
+        batch_size=2,
         lsds_to_affs_weight_ratio=0.5,
         validation_interval=5000,
         snapshot_interval=10000,
@@ -41,6 +42,7 @@ class DacapoRunBuilder:
         repetitions=3,
         start_config=None,
     ):
+        lr = base_lr * batch_size
         config_store = create_config_store()
         self.create_task(lsds_to_affs_weight_ratio)
         self.create_datasplit(
@@ -54,7 +56,7 @@ class DacapoRunBuilder:
             config_store,
         )
         self.create_architecture()
-        self.create_trainer(lr, snapshot_interval)
+        self.create_trainer(lr, batch_size, snapshot_interval)
         self.create_run(
             self.task_config,
             self.datasplit_config,
@@ -67,10 +69,10 @@ class DacapoRunBuilder:
             config_store,
         )
 
-    def create_trainer(self, lr, snapshot_interval=5000):
+    def create_trainer(self, lr, batch_size=2, snapshot_interval=5000):
         self.trainer_config = GunpowderTrainerConfig(
-            name=f"default_trainer_lr_{lr}",
-            batch_size=2,
+            name=f"default_trainer_lr_{lr}_bs_{batch_size}",
+            batch_size=batch_size,
             learning_rate=lr,
             augments=[
                 ElasticAugmentConfig(
