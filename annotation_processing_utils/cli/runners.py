@@ -16,12 +16,19 @@ def run_dacapo_train():
 
     parser = argparse.ArgumentParser(description="Run training via DaCapo")
     parser.add_argument("--run", type=str, help="Name of the run", required=True)
+    parser.add_argument(
+        "--do_validate",
+        type=bool,
+        default=False,
+        help="Whether to do validation",
+        required=False,
+    )
     args = parser.parse_args()
 
     config_store = create_config_store()
     run_config = config_store.retrieve_run_config(args.run)
     run = Run(run_config)
-    train_run(run)
+    train_run(run, args.do_validate)
 
 
 def run_inference():

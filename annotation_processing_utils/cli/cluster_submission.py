@@ -34,7 +34,7 @@ def get_arguments_per_submission(submision_yaml_path, submission_type):
                 bsub_formatter(
                     {
                         "--run": run,
-                        "bsub_args": "bsub -P cellmap -q gpu_h100 -n 20 -gpu num=1",
+                        "bsub_args": "bsub -P cellmap -q gpu_h100 -n 12 -gpu num=1",
                         "log_path": log_path,
                     },
                     submission_type,
@@ -102,7 +102,7 @@ def get_arguments_per_submission(submision_yaml_path, submission_type):
                                             "--iteration": iteration,
                                             "--roi_offset": roi_offset,
                                             "--roi_shape": roi_shape,
-                                            "bsub_args": "bsub -P cellmap -q gpu_tesla -n 4 -gpu num=1",
+                                            "bsub_args": "bsub -P cellmap -q gpu_h100 -n 4 -gpu num=1",
                                             "log_path": log_path,
                                         },
                                         submission_type,

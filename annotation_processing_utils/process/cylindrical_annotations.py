@@ -681,7 +681,11 @@ class CylindricalAnnotations:
         state = parse_url(self.roi_calculator.neuroglancer_url)
         for name, zarr_path in zip(
             ["mask", "annotations_as_cylinders", "training_points"],
-            [self.output_mask_zarr, self.output_gt_zarr, self.output_training_points_zarr],
+            [
+                self.output_mask_zarr,
+                self.output_gt_zarr,
+                self.output_training_points_zarr,
+            ],
         ):
             zarr_path = (
                 zarr_path.replace("/nrs/cellmap", "nrs/")
@@ -717,8 +721,12 @@ class CylindricalAnnotations:
         self.write_training_points()
 
         if self.removed_ids:
-            removed_annotations_dir = f"{self.output_annotations_directory}/removed_annotations"
-            kept_annotations_dir = f"{self.output_annotations_directory}/kept_annotations"
+            removed_annotations_dir = (
+                f"{self.output_annotations_directory}/removed_annotations"
+            )
+            kept_annotations_dir = (
+                f"{self.output_annotations_directory}/kept_annotations"
+            )
 
             for annotations_dir in [removed_annotations_dir, kept_annotations_dir]:
                 if os.path.isdir(annotations_dir):
@@ -747,6 +755,7 @@ class CylindricalAnnotations:
     def create_dacapo_run(
         self,
         lr=5e-5,
+        batch_size=2,
         lsds_to_affs_weight_ratio=0.5,
         validation_interval=5000,
         snapshot_interval=10000,
@@ -762,7 +771,8 @@ class CylindricalAnnotations:
             training_points=self.training_points,
             training_point_selection_mode=self.training_point_selection_mode,
             validation_rois_dict=self.roi_calculator.rois_dict["validation"],
-            lr=lr,
+            base_lr=lr,
+            batch_size=batch_size,
             lsds_to_affs_weight_ratio=lsds_to_affs_weight_ratio,
             validation_interval=validation_interval,
             snapshot_interval=snapshot_interval,
