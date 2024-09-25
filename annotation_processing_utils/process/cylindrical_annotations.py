@@ -100,6 +100,13 @@ class CylindricalAnnotations:
         self.roi_calculator = TrainingValidationTestRoiCalculator(
             training_validation_test_roi_info_yaml
         )
+        if self.roi_calculator.resolution / self.raw_dataset.voxel_size[0] == 2:
+            print(
+                f"Using scale s1 to get a resolution of {self.raw_dataset.voxel_size[0]}"
+            )
+            raw_dataset_name = raw_dataset_name.replace("/s0", "/s1")
+            self.raw_dataset = open_ds(raw_zarr, raw_dataset_name)
+
         self.roi_calculator.standard_processing(output_annotations_directory)
         self.training_point_selection_mode = training_point_selection_mode
 
@@ -161,7 +168,7 @@ class CylindricalAnnotations:
             ]
         )
         # # use only first 500 annotations
-        # df = df.iloc[:100]
+        df = df.iloc[:100]
         self.annotation_starts = (
             np.array([df["start z (nm)"], df["start y (nm)"], df["start x (nm)"]]).T
             / self.voxel_size[0]
