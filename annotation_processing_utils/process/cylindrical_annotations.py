@@ -66,6 +66,7 @@ class CylindricalAnnotations:
         output_training_points_zarr=None,
         dataset="jrc_22ak351-leaf-3m",
         training_point_selection_mode="all",
+        debug=False,
     ):
         np.random.seed(0)  # set seed for consistency of locations
         self.username = getpass.getuser()
@@ -112,7 +113,7 @@ class CylindricalAnnotations:
 
         # 36x36x36 is shape of region used to caluclate loss,so we need to make sure that the center is at least the diagonal away from the validation/test rois
         self.longest_box_diagonal = int(np.ceil(np.sqrt(3 * (36**2)))) + 1
-
+        self.debug = debug  # if true, only use first 100 annotations
         neuroglancer.set_server_bind_address("0.0.0.0")
 
     def in_cylinder(self, end_1, end_2, radius):
@@ -168,7 +169,8 @@ class CylindricalAnnotations:
             ]
         )
         # # use only first 500 annotations
-        df = df.iloc[:100]
+        if self.debug:
+            df = df.iloc[:100]
         self.annotation_starts = (
             np.array([df["start z (nm)"], df["start y (nm)"], df["start x (nm)"]]).T
             / self.voxel_size[0]
