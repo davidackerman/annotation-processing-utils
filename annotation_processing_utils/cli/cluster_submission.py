@@ -3,11 +3,13 @@ from datetime import datetime
 from pathlib import Path
 import yaml
 
+import subprocess
+import time
+
 # NOTE: need the following import torch here - even though unused - otherwise get the following error:
 # Error: mkl-service + Intel(R) MKL: MKL_THREADING_LAYER=INTEL is incompatible with libgomp-a34b3233.so.1 library.
 # 	Try to import numpy first or set the threading layer accordingly. Set MKL_SERVICE_FORCE_INTEL to force it.
 # This happens if import torch happens after importing TrainingValidationTestRoiCalculator
-import torch
 from annotation_processing_utils.process.training_validation_test_roi_calculator import (
     TrainingValidationTestRoiCalculator,
 )
@@ -46,6 +48,12 @@ def get_arguments_per_submission(submision_yaml_path, submission_type):
     analysis_info = submission_info["analysis_info"]
     iterations_start, iterations_end, iterations_step = submission_info["iterations"]
     postprocessing_suffixes = submission_info["postprocessing_suffixes"]
+
+    # failed_submissions = [
+    #     "validation/finetuned_3d_lsdaffs_weight_ratio_0.5_jrc_22ak351-leaf-3m_plasmodesmata_all_training_points_unet_default_trainer_lr_0.0001_bs_4__0/11/iteration_125000",
+    #     "test/finetuned_3d_lsdaffs_weight_ratio_0.5_jrc_22ak351-leaf-3m_plasmodesmata_all_training_points_unet_default_trainer_lr_0.0001_bs_4__1/08/iteration_275000",
+    #     "test/finetuned_3d_lsdaffs_weight_ratio_0.5_jrc_22ak351-leaf-3m_plasmodesmata_all_training_points_unet_default_trainer_lr_0.0002_bs_4__0/11/iteration_325000",
+    # ]
     for current_analysis_info in analysis_info:
         analysis_info_name = current_analysis_info["name"]
         raw_path = current_analysis_info["raw_path"]
@@ -79,89 +87,98 @@ def get_arguments_per_submission(submision_yaml_path, submission_type):
                             / roi_name
                             / f"iteration_{iteration}"
                         )
-                        if (
-                            run
-                            == "finetuned_3d_lsdaffs_weight_ratio_0.50_jrc_22ak351-leaf-2l_plasmodesmata_pseudorandom_training_centers_unet_default_v2_no_dataset_predictor_node_lr_5E-5__2"
-                            and roi_name == "04"
-                            and iteration == 35000
-                        ) or (
-                            run
-                            == "finetuned_3d_lsdaffs_weight_ratio_0.50_jrc_22ak351-leaf-2l_plasmodesmata_pseudorandom_training_centers_unet_default_v2_no_dataset_predictor_node_lr_5E-5__2"
-                            and roi_name == "01"
-                            and iteration == 180000
-                        ):
-                            if submission_type == "inference":
-                                roi_offset = ",".join(str(o) for o in roi.offset)
-                                roi_shape = ",".join(str(s) for s in roi.shape)
+
+                        if submission_type == "inference":
+                            roi_offset = ",".join(str(o) for o in roi.offset)
+                            roi_shape = ",".join(str(s) for s in roi.shape)
+                            arguments_per_submission.append(
+                                bsub_formatter(
+                                    {
+                                        "--run": run,
+                                        "--raw_path": raw_path,
+                                        "--inference_path": affinities_path,
+                                        "--iteration": iteration,
+                                        "--roi_offset": roi_offset,
+                                        "--roi_shape": roi_shape,
+                                        "bsub_args": "bsub -P cellmap -q gpu_h100 -n 4 -gpu num=1",
+                                        "log_path": log_path,
+                                    },
+                                    submission_type,
+                                )
+                            )
+
+                        for postprocessing_suffix in postprocessing_suffixes:
+                            base_segmentation_path = (
+                                inference_base_path
+                                / "processed"
+                                / yaml_name
+                                / validation_or_test
+                                / run
+                                / roi_name
+                                / f"iteration_{iteration}"
+                            )
+
+                            if submission_type == "mws":
                                 arguments_per_submission.append(
                                     bsub_formatter(
                                         {
-                                            "--run": run,
-                                            "--raw_path": raw_path,
-                                            "--inference_path": affinities_path,
-                                            "--iteration": iteration,
-                                            "--roi_offset": roi_offset,
-                                            "--roi_shape": roi_shape,
-                                            "bsub_args": "bsub -P cellmap -q gpu_h100 -n 4 -gpu num=1",
+                                            "--affinities_path": affinities_path,
+                                            "--segmentation_path": base_segmentation_path,
+                                            "bsub_args": f"bsub -P cellmap -n 12 -J mws-mongo_{base_segmentation_path}",
                                             "log_path": log_path,
                                         },
                                         submission_type,
                                     )
                                 )
-
-                            for postprocessing_suffix in postprocessing_suffixes:
-                                base_segmentation_path = (
-                                    inference_base_path
-                                    / "processed"
+                            elif submission_type == "metrics":
+                                metrics_path = (
+                                    metrics_base_path
                                     / yaml_name
                                     / validation_or_test
                                     / run
                                     / roi_name
-                                    / f"iteration_{iteration}"
+                                    / f"iteration_{iteration}{postprocessing_suffix}_segs"
+                                )
+                                test_path = (
+                                    base_segmentation_path.absolute().as_posix()
+                                    + f"{postprocessing_suffix}_segs"
                                 )
 
-                                if submission_type == "mws":
-                                    arguments_per_submission.append(
-                                        bsub_formatter(
-                                            {
-                                                "--affinities_path": affinities_path,
-                                                "--segmentation_path": base_segmentation_path,
-                                                "bsub_args": "bsub -P cellmap -n 48",
-                                                "log_path": log_path,
-                                            },
-                                            submission_type,
-                                        )
+                                metrics_submission_dict = {
+                                    "--gt_path": gt_path,
+                                    "--test_path": test_path,
+                                    "--metrics_path": metrics_path,
+                                    "--num_workers": 10,
+                                    "bsub_args": "bsub -P cellmap -n 10",
+                                    "log_path": log_path,
+                                }
+                                if mask_path:
+                                    metrics_submission_dict["mask_path"] = mask_path
+                                arguments_per_submission.append(
+                                    bsub_formatter(
+                                        metrics_submission_dict,
+                                        submission_type,
                                     )
-                                elif submission_type == "metrics":
-                                    metrics_path = (
-                                        metrics_base_path
-                                        / yaml_name
-                                        / validation_or_test
-                                        / run
-                                        / roi_name
-                                        / f"iteration_{iteration}{postprocessing_suffix}_segs"
-                                    )
-                                    test_path = (
-                                        base_segmentation_path.absolute().as_posix()
-                                        + f"{postprocessing_suffix}_segs"
-                                    )
-
-                                    arguments_per_submission.append(
-                                        bsub_formatter(
-                                            {
-                                                "--gt_path": gt_path,
-                                                "--test_path": test_path,
-                                                "--mask_path": mask_path,
-                                                "--metrics_path": metrics_path,
-                                                "--num_workers": 10,
-                                                "bsub_args": "bsub -P cellmap -n 10",
-                                                "log_path": log_path,
-                                            },
-                                            submission_type,
-                                        )
-                                    )
+                                )
 
     return arguments_per_submission
+
+
+def get_bjobs_matching(status, pattern=None):
+    try:
+        # Run bjobs with the -r option to get only running jobs
+        result = subprocess.run(
+            ["bjobs", "-w", status], capture_output=True, text=True, check=True
+        )
+        # Optionally filter lines that match a given pattern
+        if pattern:
+            jobs = [line for line in result.stdout.splitlines() if pattern in line]
+        else:
+            jobs = result.stdout.splitlines()
+        return jobs
+    except subprocess.CalledProcessError as e:
+        print("Error running bjobs:", e)
+        return []
 
 
 def bsub_formatter(submission_arguments_dict, submission_type):
@@ -184,13 +201,28 @@ def generic_submitter(submission_type):
         "submission_info_path", type=str, help="Path to the submission info yaml"
     )
     args = parser.parse_args()
-
     arguments_per_submission = get_arguments_per_submission(
         args.submission_info_path, submission_type
     )
+    if submission_type == "mws":
+        submission_count = 0
+        total_submissions = len(arguments_per_submission)
+        while True:
+            time.sleep(0.01)
+            if len(arguments_per_submission) == 0:
+                print("Finsihed mws submissions")
+                break
+            running_jobs = get_bjobs_matching("-r", "mws-mongo_")
+            pending_jobs = get_bjobs_matching("-p", "mws-mongo_")
+            if len(running_jobs) + len(pending_jobs) <= 20:
+                submission_count += 1
+                print(f"Submitting mws job {submission_count}/{total_submissions}")
+                current_arguments = arguments_per_submission.pop(0)
+                os.system(current_arguments)
 
-    for submission_arguments in arguments_per_submission:
-        os.system(submission_arguments)
+    else:
+        for submission_arguments in arguments_per_submission:
+            os.system(submission_arguments)
 
 
 def submit_inference():
