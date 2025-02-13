@@ -22,18 +22,34 @@ from dacapo.experiments.starts import StartConfig
 from dacapo.store.create_store import create_config_store
 import getpass
 
+from decimal import Decimal
+
+
+def scientific_to_plain_string(number):
+    # Convert to a Decimal and quantize it to the smallest necessary precision
+    decimal_number = Decimal(number).normalize()
+    # Convert to string, ensuring no trailing zeros
+    plain_string = (
+        str(decimal_number).rstrip("0").rstrip(".")
+        if "." in str(decimal_number)
+        else str(decimal_number)
+    )
+    return plain_string
+
 
 class DacapoRunBuilder:
     def __init__(
         self,
-        dataset,
-        organelle,
-        mask_zarr,
-        gt_zarr,
-        training_points,
-        training_point_selection_mode,
-        validation_rois_dict,
-        lr=5e-5,
+        dataset=None,
+        organelle=None,
+        mask_zarr=None,
+        gt_zarr=None,
+        training_points=None,
+        training_point_selection_mode=None,
+        validation_rois_dict=None,
+        datasplit_config=None,
+        base_lr=2.5e-5,
+        batch_size=2,
         lsds_to_affs_weight_ratio=0.5,
         validation_interval=5000,
         snapshot_interval=10000,
@@ -41,20 +57,26 @@ class DacapoRunBuilder:
         repetitions=3,
         start_config=None,
     ):
+        lr = base_lr * batch_size
         config_store = create_config_store()
         self.create_task(lsds_to_affs_weight_ratio)
-        self.create_datasplit(
-            dataset,
-            organelle,
-            gt_zarr,
-            mask_zarr,
-            training_points,
-            training_point_selection_mode,
-            validation_rois_dict,
-            config_store,
-        )
-        self.create_architecture()
-        self.create_trainer(lr, snapshot_interval)
+
+        if datasplit_config:
+            self.datasplit_config = datasplit_config
+        else:
+            self.create_datasplit(
+                dataset,
+                organelle,
+                gt_zarr,
+                mask_zarr,
+                training_points,
+                training_point_selection_mode,
+                validation_rois_dict,
+                config_store,
+            )
+
+        self.architecture_config = self.create_architecture()
+        self.create_trainer(lr, batch_size, snapshot_interval)
         self.create_run(
             self.task_config,
             self.datasplit_config,
@@ -67,10 +89,11 @@ class DacapoRunBuilder:
             config_store,
         )
 
-    def create_trainer(self, lr, snapshot_interval=5000):
+    def create_trainer(self, lr, batch_size=2, snapshot_interval=5000):
+        lr_str = scientific_to_plain_string(str(lr))
         self.trainer_config = GunpowderTrainerConfig(
-            name=f"default_trainer_lr_{lr}",
-            batch_size=2,
+            name=f"default_trainer_lr_{lr_str}_bs_{batch_size}",
+            batch_size=batch_size,
             learning_rate=lr,
             augments=[
                 ElasticAugmentConfig(
@@ -109,8 +132,9 @@ class DacapoRunBuilder:
             lsds_to_affs_weight_ratio=lsds_to_affs_weight_ratio,
         )
 
-    def create_architecture(self):
-        self.architecture_config = CNNectomeUNetConfig(
+    @staticmethod
+    def create_architecture():
+        return CNNectomeUNetConfig(
             name="unet",
             input_shape=Coordinate(216, 216, 216),
             eval_shape_increase=Coordinate(72, 72, 72),
@@ -193,7 +217,7 @@ class DacapoRunBuilder:
         datasplit_config,
         architecture_config,
         trainer_config,
-        iterations=200000,
+        iterations=500000,
         validation_interval=5000,
         repetitions=3,
         start_config=None,

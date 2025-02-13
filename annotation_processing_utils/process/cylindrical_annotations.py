@@ -54,6 +54,31 @@ class VoxelNmConverter:
             self.voxel = nm_coordinates / resolution[0]
 
 
+def split_dataset_path(dataset_path, scale=None) -> tuple[str, str]:
+    """Split the dataset path into the filename and dataset
+
+    Args:
+        dataset_path ('str'): Path to the dataset
+        scale ('int'): Scale to use, if present
+
+    Returns:
+        Tuple of filename and dataset
+    """
+
+    # split at .zarr or .n5, whichever comes last
+    splitter = (
+        ".zarr" if dataset_path.rfind(".zarr") > dataset_path.rfind(".n5") else ".n5"
+    )
+
+    filename, dataset = dataset_path.split(splitter)
+
+    # include scale if present
+    if scale is not None:
+        dataset += f"/s{scale}"
+
+    return filename + splitter, dataset
+
+
 class CylindricalAnnotations:
     def __init__(
         self,
@@ -66,6 +91,8 @@ class CylindricalAnnotations:
         output_training_points_zarr=None,
         dataset="jrc_22ak351-leaf-3m",
         training_point_selection_mode="all",
+        raw_path=None,
+        debug=False,
     ):
         np.random.seed(0)  # set seed for consistency of locations
         self.username = getpass.getuser()
@@ -79,33 +106,46 @@ class CylindricalAnnotations:
         if not output_training_points_zarr:
             output_training_points_zarr = f"/nrs/cellmap/{self.username}/cellmap/{self.organelle}/training_points.zarr"
         if not output_annotations_directory:
-            output_annotations_directory = f"/groups/cellmap/cellmap/{self.username}/neuroglancer_annotations/{self.organelle}/{self.dataset}"
+            output_annotations_directory = f"/groups/cellmap/cellmap/{self.username}/neuroglancer_annotations/{self.organelle}"
 
-        raw_zarr = f"/nrs/cellmap/data/{self.dataset}/{self.dataset}.zarr"
-        if "em" in os.listdir(raw_zarr):
-            raw_dataset_name = "/em/fibsem-uint8/s0"
-        elif "volumes" in os.listdir(raw_zarr):
-            raw_dataset_name = "/volumes/raw/s0"
-        elif "recon-1":
-            raw_dataset_name = "/recon-1/em/fibsem-uint8/s0"
+        if raw_path:
+            raw_zarr, raw_dataset_name = split_dataset_path(raw_path)
+        else:
+            raw_zarr = f"/nrs/cellmap/data/{dataset}/{dataset}.zarr"
+            if "em" in os.listdir(raw_zarr):
+                raw_dataset_name = "/em/fibsem-uint8/s0"
+            elif "volumes" in os.listdir(raw_zarr):
+                raw_dataset_name = "/volumes/raw/s0"
+            elif "recon-1":
+                raw_dataset_name = "/recon-1/em/fibsem-uint8/s0"
+
         self.raw_dataset = open_ds(raw_zarr, raw_dataset_name)
 
         self.output_mask_zarr = output_mask_zarr
         self.output_gt_zarr = output_gt_zarr
         self.output_training_points_zarr = output_training_points_zarr
-        self.output_annotations_directory = output_annotations_directory
+        self.output_annotations_directory = (
+            output_annotations_directory + "/" + self.dataset
+        )
         self.empty_annotations = []
         self.radius = radius
 
         self.roi_calculator = TrainingValidationTestRoiCalculator(
             training_validation_test_roi_info_yaml
         )
-        self.roi_calculator.standard_processing(output_annotations_directory)
+        if self.roi_calculator.resolution / self.raw_dataset.voxel_size[0] == 2:
+            print(
+                f"Using scale s1 to get a resolution of {self.raw_dataset.voxel_size[0]}"
+            )
+            raw_dataset_name = raw_dataset_name.replace("/s0", "/s1")
+            self.raw_dataset = open_ds(raw_zarr, raw_dataset_name)
+
+        self.roi_calculator.standard_processing(self.output_annotations_directory)
         self.training_point_selection_mode = training_point_selection_mode
 
         # 36x36x36 is shape of region used to caluclate loss,so we need to make sure that the center is at least the diagonal away from the validation/test rois
         self.longest_box_diagonal = int(np.ceil(np.sqrt(3 * (36**2)))) + 1
-
+        self.debug = debug  # if true, only use first 100 annotations
         neuroglancer.set_server_bind_address("0.0.0.0")
 
     def in_cylinder(self, end_1, end_2, radius):
@@ -161,7 +201,8 @@ class CylindricalAnnotations:
             ]
         )
         # # use only first 500 annotations
-        # df = df.iloc[:100]
+        if self.debug:
+            df = df.iloc[:100]
         self.annotation_starts = (
             np.array([df["start z (nm)"], df["start y (nm)"], df["start x (nm)"]]).T
             / self.voxel_size[0]
@@ -681,7 +722,11 @@ class CylindricalAnnotations:
         state = parse_url(self.roi_calculator.neuroglancer_url)
         for name, zarr_path in zip(
             ["mask", "annotations_as_cylinders", "training_points"],
-            [self.output_mask_zarr, self.output_gt_zarr, self.output_training_points_zarr],
+            [
+                self.output_mask_zarr,
+                self.output_gt_zarr,
+                self.output_training_points_zarr,
+            ],
         ):
             zarr_path = (
                 zarr_path.replace("/nrs/cellmap", "nrs/")
@@ -695,12 +740,26 @@ class CylindricalAnnotations:
         if len(self.removed_ids):
             print(f"{len(self.removed_ids)=}")
             state.layers["removed_annotations"] = neuroglancer.AnnotationLayer(
-                source=f"{self.output_annotations_directory}/removed_annotations"
+                source=f"{self.output_annotations_directory}/removed_annotations".replace(
+                    "/nrs/cellmap/",
+                    "precomputed://https://cellmap-vm1.int.janelia.org/nrs/",
+                )
             )
-            state.layers["kept_annotations"] = neuroglancer.AnnotationLayer(
-                source=f"{self.output_annotations_directory}/kept_annotations"
-            )
-        print(f"Neuroglancer url:\n{neuroglancer.to_url(state)}")
+            if len(self.removed_ids) != len(self.annotation_starts):
+                state.layers["kept_annotations"] = neuroglancer.AnnotationLayer(
+                    source=f"{self.output_annotations_directory}/kept_annotations".replace(
+                        "/nrs/cellmap/",
+                        "precomputed://https://cellmap-vm1.int.janelia.org/nrs/",
+                    )
+                )
+        self.neuroglancer_url = neuroglancer.to_url(state)
+        # write urls to a file
+        with open(
+            f"{self.output_annotations_directory}/neuroglancer_url.txt", "w"
+        ) as f:
+            f.write(self.neuroglancer_url)
+
+        print(f"Neuroglancer url:\n{self.neuroglancer_url}")
 
     def standard_processing(self):
         print("Extract information from annotations:")
@@ -717,25 +776,32 @@ class CylindricalAnnotations:
         self.write_training_points()
 
         if self.removed_ids:
-            removed_annotations_dir = f"{self.output_annotations_directory}/removed_annotations"
-            kept_annotations_dir = f"{self.output_annotations_directory}/kept_annotations"
+            removed_annotations_dir = (
+                f"{self.output_annotations_directory}/removed_annotations"
+            )
+            kept_annotations_dir = (
+                f"{self.output_annotations_directory}/kept_annotations"
+            )
 
             for annotations_dir in [removed_annotations_dir, kept_annotations_dir]:
                 if os.path.isdir(annotations_dir):
                     shutil.rmtree(annotations_dir)
 
-            self.write_out_annotations(
-                output_directory=f"{self.output_annotations_directory}/removed_annotations",
-                annotation_ids=self.removed_ids,
-            )
-            self.write_out_annotations(
-                output_directory=f"{self.output_annotations_directory}/kept_annotations",
-                annotation_ids=[
-                    id
-                    for id in range(1, len(self.annotation_starts) + 1)
-                    if id not in self.removed_ids
-                ],
-            )
+            # "removed" meaning removed from training, "kept" meaning kept in training
+            if len(self.removed_ids) > 0:
+                self.write_out_annotations(
+                    output_directory=f"{self.output_annotations_directory}/removed_annotations",
+                    annotation_ids=self.removed_ids,
+                )
+            if len(self.removed_ids) != len(self.annotation_starts):
+                self.write_out_annotations(
+                    output_directory=f"{self.output_annotations_directory}/kept_annotations",
+                    annotation_ids=[
+                        id
+                        for id in range(1, len(self.annotation_starts) + 1)
+                        if id not in self.removed_ids
+                    ],
+                )
         self.get_neuroglancer_url()
         # self.get_neuroglancer_view()
 
@@ -746,11 +812,12 @@ class CylindricalAnnotations:
 
     def create_dacapo_run(
         self,
-        lr=5e-5,
+        base_lr=2.5e-5,
+        batch_size=2,
         lsds_to_affs_weight_ratio=0.5,
         validation_interval=5000,
         snapshot_interval=10000,
-        iterations=200000,
+        iterations=500000,
         repetitions=3,
         start_config=CosemStartConfig("setup04", "1820500"),
     ):
@@ -762,7 +829,32 @@ class CylindricalAnnotations:
             training_points=self.training_points,
             training_point_selection_mode=self.training_point_selection_mode,
             validation_rois_dict=self.roi_calculator.rois_dict["validation"],
-            lr=lr,
+            base_lr=base_lr,
+            batch_size=batch_size,
+            lsds_to_affs_weight_ratio=lsds_to_affs_weight_ratio,
+            validation_interval=validation_interval,
+            snapshot_interval=snapshot_interval,
+            iterations=iterations,
+            repetitions=repetitions,
+            start_config=start_config,
+        )
+
+    @staticmethod
+    def create_combined_datasplit_dacapo_run(
+        datasplit_config,
+        base_lr=2.5e-5,
+        batch_size=2,
+        lsds_to_affs_weight_ratio=0.5,
+        validation_interval=5000,
+        snapshot_interval=10000,
+        iterations=500000,
+        repetitions=3,
+        start_config=CosemStartConfig("setup04", "1820500"),
+    ):
+        DacapoRunBuilder(
+            datasplit_config=datasplit_config,
+            base_lr=base_lr,
+            batch_size=batch_size,
             lsds_to_affs_weight_ratio=lsds_to_affs_weight_ratio,
             validation_interval=validation_interval,
             snapshot_interval=snapshot_interval,
