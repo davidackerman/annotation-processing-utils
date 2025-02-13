@@ -9,6 +9,7 @@ from dacapo.experiments.datasplits.datasets.arrays import (
     IntensitiesArrayConfig,
     IntensitiesArray,
 )
+from annotation_processing_utils.utils.dacapo_util import DacapoRunBuilder
 from annotation_processing_utils.utils.parse_data_path import parse_data_path
 from annotation_processing_utils.utils.predict_with_write_size import (
     predict_with_write_size,
@@ -45,16 +46,19 @@ def inference(
     inference_path: str,
     roi: Roi,
 ):
-    config_store = create_config_store()
-    run_config = config_store.retrieve_run_config(run)
-    run = Run(run_config)
-    run.model = create_model(run.architecture)
+
+    architecture_config = DacapoRunBuilder.create_architecture()
+    architecture_type = architecture_config.architecture_type
+    architecture = architecture_type(architecture_config)
+    model = create_model(
+        architecture
+    )  # hack because we dont want to actually read in the run config which contains tens of thousands of points
     # create weights store and read weights
     weights_store = create_weights_store()
     weights = weights_store.retrieve_weights(run, iteration)
-    run.model.load_state_dict(weights.model)
+    model.load_state_dict(weights.model)
     torch.backends.cudnn.benchmark = True
-    run.model.eval()
+    model.eval()
 
     raw_file_name, raw_dataset_name = parse_data_path(raw_path)
     inference_file_name, inference_dataset_name = parse_data_path(inference_path)
@@ -88,7 +92,7 @@ def inference(
     raw_array = IntensitiesArray(raw_intensities_array_config)
 
     predict_with_write_size(
-        run.model,
+        model,
         raw_array,
         prediction_array_identifier,
         compute_context=LocalTorch(),
