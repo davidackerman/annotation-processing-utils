@@ -18,7 +18,9 @@ import warnings
 
 
 class RoiToSplitInVoxels:
-    def __init__(self, roi_start, roi_end, resolution, split_dimension=None):
+    def __init__(
+        self, roi_start, roi_end, resolution, split_dimension=None, keep_if_empty=False
+    ):
         dims = ["z", "y", "x"]
         roi = Roi(roi_start, roi_end - roi_start)
         roi = roi.snap_to_grid((resolution, resolution, resolution), mode="shrink")
@@ -28,6 +30,7 @@ class RoiToSplitInVoxels:
         self.split_dimension = (
             dims.index(split_dimension) if split_dimension in dims else split_dimension
         )
+        self.keep_if_empty = keep_if_empty
 
 
 class TrainingValidationTestRoiCalculator:
@@ -89,6 +92,11 @@ class TrainingValidationTestRoiCalculator:
                         if "split_dimension" in roi_info
                         else None
                     )
+                    keep_if_empty = (
+                        roi_info["keep_if_empty"]
+                        if "keep_if_empty" in roi_info
+                        else False
+                    )
                     for idx, dim in enumerate(["z", "y", "x"]):
                         dim_start, dim_end = roi_info[dim].split("-")
                         roi_start[idx] = int(dim_start)
@@ -98,14 +106,22 @@ class TrainingValidationTestRoiCalculator:
                         roi_end,
                         self.resolution,
                         split_dimension,
+                        keep_if_empty,
                     )
                     if self.__roi_is_not_empty(roi_to_split_in_voxels.roi):
                         self.rois_to_split_in_voxels[roi_type][
                             roi_name
                         ] = roi_to_split_in_voxels
+                    elif roi_to_split_in_voxels.keep_if_empty:
+                        self.rois_to_split_in_voxels[roi_type][
+                            roi_name
+                        ] = roi_to_split_in_voxels
+                        warnings.warn(
+                            f"Empty roi {roi_to_split_in_voxels.roi*self.resolution}, but keeping it because keep_if_empty is True"
+                        )
                     else:
                         warnings.warn(
-                            f"Empty roi {roi_to_split_in_voxels.roi*self.resolution}"
+                            f"Empty roi {roi_to_split_in_voxels.roi*self.resolution}, skipping"
                         )
 
     def __get_all_annotation_centers_voxels(self):
