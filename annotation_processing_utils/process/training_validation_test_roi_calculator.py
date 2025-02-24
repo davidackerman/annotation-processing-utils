@@ -19,7 +19,13 @@ import warnings
 
 class RoiToSplitInVoxels:
     def __init__(
-        self, roi_start, roi_end, resolution, split_dimension=None, keep_if_empty=False
+        self,
+        roi_start,
+        roi_end,
+        resolution,
+        split_dimension=None,
+        keep_if_empty=False,
+        type_if_do_not_split="validation",
     ):
         dims = ["z", "y", "x"]
         roi = Roi(roi_start, roi_end - roi_start)
@@ -31,6 +37,8 @@ class RoiToSplitInVoxels:
             dims.index(split_dimension) if split_dimension in dims else split_dimension
         )
         self.keep_if_empty = keep_if_empty
+        if self.split_dimension == "do_not_split":
+            self.type_if_do_not_split = type_if_do_not_split
 
 
 class TrainingValidationTestRoiCalculator:
@@ -97,6 +105,12 @@ class TrainingValidationTestRoiCalculator:
                         if "keep_if_empty" in roi_info
                         else False
                     )
+                    type_if_do_not_split = (
+                        roi_info["type_if_do_not_split"]
+                        if "type_if_do_not_split" in roi_info
+                        else "validation"
+                    )
+
                     for idx, dim in enumerate(["z", "y", "x"]):
                         dim_start, dim_end = roi_info[dim].split("-")
                         roi_start[idx] = int(dim_start)
@@ -107,6 +121,7 @@ class TrainingValidationTestRoiCalculator:
                         self.resolution,
                         split_dimension,
                         keep_if_empty,
+                        type_if_do_not_split,
                     )
                     if self.__roi_is_not_empty(roi_to_split_in_voxels.roi):
                         self.rois_to_split_in_voxels[roi_type][
@@ -373,8 +388,10 @@ class TrainingValidationTestRoiCalculator:
             "validation_test"
         ].items():
             if roi_to_split.split_dimension == "do_not_split":
-                # then it was deemed too small to split so we just use it as validation
-                best_validation_roi = roi_to_split.roi
+                # then it was deemed too small to split so we just use it as validation if type_if_do_not_split hasn't been specified
+                self.rois_dict[roi_to_split.type_if_do_not_split][roi_to_split_name] = (
+                    roi_to_split.roi * self.resolution
+                )
             else:
                 _, best_validation_roi, best_test_roi = self.split_validation_test_roi(
                     roi_to_split.roi,
@@ -387,9 +404,9 @@ class TrainingValidationTestRoiCalculator:
                 self.rois_dict["test"][roi_to_split_name] = (
                     best_test_roi * self.resolution
                 )
-            self.rois_dict["validation"][roi_to_split_name] = (
-                best_validation_roi * self.resolution
-            )
+                self.rois_dict["validation"][roi_to_split_name] = (
+                    best_validation_roi * self.resolution
+                )
 
     def write_roi_annotations(self, output_directory):
         output_directory = f"{output_directory}/bounding_boxes"
