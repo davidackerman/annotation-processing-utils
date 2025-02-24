@@ -157,7 +157,6 @@ class GetBest:
                                     validation_or_test,
                                     roi_name,
                                 )
-
                             combined_dict = combined_dicts[validation_or_test]
                             if len(combined_dict["combined"]["average_f1_score"]) == 0:
                                 continue
