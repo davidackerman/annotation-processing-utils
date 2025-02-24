@@ -191,11 +191,7 @@ class InstanceSegmentationScorer:
         tp = len(matches)
         fp = n_test - tp
         fn = n_gt - tp
-        denominator = tp + 0.5 * (fp + fn)
-        if denominator == 0:
-            f1_score = np.NaN
-        else:
-            f1_score = tp / (tp + 0.5 * (fp + fn))
+        f1_score = tp / (tp + 0.5 * (fp + fn)) if (tp + fp + fn) != 0 else 1
 
         # iou score
         iou = self.__get_iou()
@@ -223,8 +219,8 @@ class InstanceSegmentationScorer:
             "tp": tp,
             "fp": fp,
             "fn": fn,
-            "precision": tp / (tp + fp) if tp + fp > 0 else np.NaN,
-            "recall": tp / (tp + fn) if tp + fn > 0 else np.NaN,
+            "precision": tp / (tp + fp) if tp + fp != 0 else 1,
+            "recall": tp / (tp + fn) if tp + fn != 0 else 1,
             "f1_score": f1_score,
             "iou": average_iou,
             "tp_gt_test_id_pairs": tp_gt_test_id_pairs,
@@ -243,10 +239,7 @@ class InstanceSegmentationScorer:
         union = (
             np.expand_dims(gt_volumes, 1) + np.expand_dims(test_volumes, 0)
         ) - gt_test_overlaps_without_background
-        if union == 0:
-            iou = np.NaN
-        else:
-            iou = gt_test_overlaps_without_background / union
+        iou = gt_test_overlaps_without_background / union
         return iou
 
     def __get_iou_score(self):
