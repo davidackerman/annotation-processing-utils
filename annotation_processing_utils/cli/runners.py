@@ -72,7 +72,7 @@ def run_inference():
 
 
 def run_mws():
-    from annotation_processing_utils.postprocess.mws import mws
+    from annotation_processing_utils.postprocess.rusty_mws_processor import rusty_mws_processor
 
     parser = argparse.ArgumentParser(
         description="Run mutex watershed segmentation for an affinities dataset"
@@ -95,7 +95,7 @@ def run_mws():
         required=False,
     )
     args = parser.parse_args()
-    mws(args.affinities_path, args.segmentation_path, args.mask_path)
+    rusty_mws_processor(args.affinities_path, args.segmentation_path, args.mask_path)
 
 
 def run_metrics():

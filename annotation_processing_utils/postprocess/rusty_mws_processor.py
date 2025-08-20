@@ -8,7 +8,9 @@ logger: logging.Logger = logging.getLogger(name=__name__)
 import getpass
 
 
-def mws(affinities_path: str, segmentation_path: str, mask_path: str = None):
+def rusty_mws_processor(
+    affinities_path: str, segmentation_path: str, mask_path: str = None
+):
     affinities_file, affinities_dataset = parse_data_path(affinities_path)
     output_file, output_dataset = parse_data_path(segmentation_path)
     if mask_path is not None:
