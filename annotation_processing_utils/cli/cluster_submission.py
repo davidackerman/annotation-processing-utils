@@ -1,11 +1,12 @@
-import os
 from datetime import datetime
 from pathlib import Path
 import yaml
-
+import os
 import subprocess
-import time
 
+import json
+import shlex
+import time
 # NOTE: need the following import torch here - even though unused - otherwise get the following error:
 # Error: mkl-service + Intel(R) MKL: MKL_THREADING_LAYER=INTEL is incompatible with libgomp-a34b3233.so.1 library.
 # 	Try to import numpy first or set the threading layer accordingly. Set MKL_SERVICE_FORCE_INTEL to force it.
@@ -36,7 +37,7 @@ def get_arguments_per_submission(submision_yaml_path, submission_type):
                 bsub_formatter(
                     {
                         "--run": run,
-                        "bsub_args": "bsub -P cellmap -q gpu_h100 -n 12 -gpu num=1",
+                        "bsub_args": "bsub -P cellmap -q gpu_short -n 12 -gpu num=1",
                         "log_path": log_path,
                     },
                     submission_type,
@@ -47,9 +48,9 @@ def get_arguments_per_submission(submision_yaml_path, submission_type):
     log_base_path = f"/nrs/cellmap/{username}/logs/{yaml_name}/{timestamp}"
     analysis_info = submission_info["analysis_info"]
     iterations_start, iterations_end, iterations_step = submission_info["iterations"]
-    postprocessing_suffixes = submission_info["postprocessing_suffixes"]
+    postprocessing = submission_info["postprocessing"]
+    failed_info = [('finetuned_3d_lsdaffs_weight_ratio_0.5_jrc_22ak351-leaf-3r_plasmodesmata_all_training_points_unet_default_trainer_lr_0.00005_bs_2__1', '07', 150000), ('finetuned_3d_lsdaffs_weight_ratio_0.5_combined_healthy_plasmodesmata_all_training_points_unet_default_trainer_lr_0.00005_bs_2__0', '03', 150000), ('finetuned_3d_lsdaffs_weight_ratio_0.5_combined_healthy_and_gall_plasmodesmata_all_training_points_unet_default_trainer_lr_0.00005_bs_2__1', '07', 375000), ('finetuned_3d_lsdaffs_weight_ratio_0.5_combined_healthy_and_gall_plasmodesmata_all_training_points_unet_default_trainer_lr_0.00005_bs_2__0', '03', 200000), ('finetuned_3d_lsdaffs_weight_ratio_0.5_combined_healthy_plasmodesmata_all_training_points_unet_default_trainer_lr_0.00005_bs_2__1', '05', 225000)]
 
-    # failed_submissions = [
     #     "validation/finetuned_3d_lsdaffs_weight_ratio_0.5_jrc_22ak351-leaf-3m_plasmodesmata_all_training_points_unet_default_trainer_lr_0.0001_bs_4__0/11/iteration_125000",
     #     "test/finetuned_3d_lsdaffs_weight_ratio_0.5_jrc_22ak351-leaf-3m_plasmodesmata_all_training_points_unet_default_trainer_lr_0.0001_bs_4__1/08/iteration_275000",
     #     "test/finetuned_3d_lsdaffs_weight_ratio_0.5_jrc_22ak351-leaf-3m_plasmodesmata_all_training_points_unet_default_trainer_lr_0.0002_bs_4__0/11/iteration_325000",
@@ -68,7 +69,7 @@ def get_arguments_per_submission(submision_yaml_path, submission_type):
         )
         roi_splitter.get_training_validation_test_rois()
         rois_dict = roi_splitter.rois_dict
-        for validation_or_test in ["validation", "test"]:
+        for validation_or_test in ["test", "validation"]:
             for roi_name, roi in rois_dict[validation_or_test].items():
                 for run in runs:
                     for iteration in range(
@@ -87,27 +88,27 @@ def get_arguments_per_submission(submision_yaml_path, submission_type):
                             / roi_name
                             / f"iteration_{iteration}"
                         )
+                        if len(failed_info)==0 or (run, roi_name, iteration) in failed_info:
 
-                        if submission_type == "inference":
-                            roi_offset = ",".join(str(o) for o in roi.offset)
-                            roi_shape = ",".join(str(s) for s in roi.shape)
-                            arguments_per_submission.append(
-                                bsub_formatter(
-                                    {
-                                        "--run": run,
-                                        "--raw_path": raw_path,
-                                        "--inference_path": affinities_path,
-                                        "--iteration": iteration,
-                                        "--roi_offset": roi_offset,
-                                        "--roi_shape": roi_shape,
-                                        "bsub_args": "bsub -P cellmap -q gpu_h100 -n 4 -gpu num=1",
-                                        "log_path": log_path,
-                                    },
-                                    submission_type,
+                            if submission_type == "inference":
+                                roi_offset = ",".join(str(o) for o in roi.offset)
+                                roi_shape = ",".join(str(s) for s in roi.shape)
+                                arguments_per_submission.append(
+                                    bsub_formatter(
+                                        {
+                                            "--run": run,
+                                            "--raw_path": raw_path,
+                                            "--inference_path": affinities_path,
+                                            "--iteration": iteration,
+                                            "--roi_offset": roi_offset,
+                                            "--roi_shape": roi_shape,
+                                            "bsub_args": "bsub -P cellmap -q gpu_short -n 4 -gpu num=1",
+                                            "log_path": log_path,
+                                        },
+                                        submission_type,
+                                    )
                                 )
-                            )
 
-                        for postprocessing_suffix in postprocessing_suffixes:
                             base_segmentation_path = (
                                 inference_base_path
                                 / "processed"
@@ -117,31 +118,49 @@ def get_arguments_per_submission(submision_yaml_path, submission_type):
                                 / roi_name
                                 / f"iteration_{iteration}"
                             )
-
                             if submission_type == "mws":
+                                args = {
+                                    "--affinities_path": affinities_path,
+                                    "--segmentation_path": base_segmentation_path,
+                                    "bsub_args": f"bsub -P cellmap -n 1 -J mws-{base_segmentation_path}",
+                                    "log_path": log_path,
+                                }
+
+                                # Add conditionally if present in postprocessing
+                                if "minimum_volume_nm_3" in postprocessing:
+                                    args["--minimum_volume_nm_3"] = postprocessing[
+                                        "minimum_volume_nm_3"
+                                    ]
+
+                                if "maximum_volume_nm_3" in postprocessing:
+                                    args["--maximum_volume_nm_3"] = postprocessing[
+                                        "maximum_volume_nm_3"
+                                    ]
+
+                                if "mask_config" in postprocessing:
+                                    args["--mask_config"] = shlex.quote(
+                                        json.dumps(postprocessing["mask_config"])
+                                    )
+
                                 arguments_per_submission.append(
                                     bsub_formatter(
-                                        {
-                                            "--affinities_path": affinities_path,
-                                            "--segmentation_path": base_segmentation_path,
-                                            "bsub_args": f"bsub -P cellmap -n 12 -J mws-mongo_{base_segmentation_path}",
-                                            "log_path": log_path,
-                                        },
+                                        args,
                                         submission_type,
                                     )
                                 )
                             elif submission_type == "metrics":
+
                                 metrics_path = (
                                     metrics_base_path
                                     / yaml_name
                                     / validation_or_test
                                     / run
                                     / roi_name
-                                    / f"iteration_{iteration}{postprocessing_suffix}_segs"
+                                    / f"iteration_{iteration}"
                                 )
+
                                 test_path = (
-                                    base_segmentation_path.absolute().as_posix()
-                                    + f"{postprocessing_suffix}_segs"
+                                    base_segmentation_path.absolute().as_posix() + f"/s0"
                                 )
 
                                 metrics_submission_dict = {
@@ -152,6 +171,7 @@ def get_arguments_per_submission(submision_yaml_path, submission_type):
                                     "bsub_args": "bsub -P cellmap -n 10",
                                     "log_path": log_path,
                                 }
+
                                 if mask_path:
                                     metrics_submission_dict["mask_path"] = mask_path
                                 arguments_per_submission.append(
@@ -204,25 +224,25 @@ def generic_submitter(submission_type):
     arguments_per_submission = get_arguments_per_submission(
         args.submission_info_path, submission_type
     )
-    if submission_type == "mws":
-        submission_count = 0
-        total_submissions = len(arguments_per_submission)
-        while True:
-            time.sleep(0.01)
-            if len(arguments_per_submission) == 0:
-                print("Finsihed mws submissions")
-                break
-            running_jobs = get_bjobs_matching("-r", "mws-mongo_")
-            pending_jobs = get_bjobs_matching("-p", "mws-mongo_")
-            if len(running_jobs) + len(pending_jobs) <= 20:
-                submission_count += 1
-                print(f"Submitting mws job {submission_count}/{total_submissions}")
-                current_arguments = arguments_per_submission.pop(0)
-                os.system(current_arguments)
+    # if submission_type == "mws":
+    #     submission_count = 0
+    #     total_submissions = len(arguments_per_submission)
+    #     while True:
+    #         time.sleep(0.01)
+    #         if len(arguments_per_submission) == 0:
+    #             print("Finsihed mws submissions")
+    #             break
+    #         running_jobs = get_bjobs_matching("-r", "mws-mongo_")
+    #         pending_jobs = get_bjobs_matching("-p", "mws-mongo_")
+    #         if len(running_jobs) + len(pending_jobs) <= 20:
+    #             submission_count += 1
+    #             print(f"Submitting mws job {submission_count}/{total_submissions}")
+    #             current_arguments = arguments_per_submission.pop(0)
+    #             os.system(current_arguments)
 
-    else:
-        for submission_arguments in arguments_per_submission:
-            os.system(submission_arguments)
+    # else:
+    for submission_arguments in arguments_per_submission:
+        os.system(submission_arguments)
 
 
 def submit_inference():
