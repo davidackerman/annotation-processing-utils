@@ -281,10 +281,26 @@ class CylindricalAnnotations:
             )
             if len(voxels_in_cylinder) > 0:
                 voxels_in_cylinder = np.array(list(voxels_in_cylinder))
+                shape = ds.data.shape
+
+                # Boolean mask for voxels that are inside the valid range
+                valid_mask = (
+                    (voxels_in_cylinder[:, 0] >= 0)
+                    & (voxels_in_cylinder[:, 0] < shape[0])
+                    & (voxels_in_cylinder[:, 1] >= 0)
+                    & (voxels_in_cylinder[:, 1] < shape[1])
+                    & (voxels_in_cylinder[:, 2] >= 0)
+                    & (voxels_in_cylinder[:, 2] < shape[2])
+                )
+
+                # Keep only the valid ones
+                valid_voxels = voxels_in_cylinder[valid_mask]
+
+                # Perform the assignment safely
                 ds.data[
-                    voxels_in_cylinder[:, 0],
-                    voxels_in_cylinder[:, 1],
-                    voxels_in_cylinder[:, 2],
+                    valid_voxels[:, 0],
+                    valid_voxels[:, 1],
+                    valid_voxels[:, 2],
                 ] = annotation_id
                 annotation_id += 1
                 all_annotation_id += 1
