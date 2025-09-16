@@ -2,7 +2,6 @@ from datetime import datetime
 from html import parser
 import os
 from annotation_processing_utils.utils.parse_data_path import parse_data_path
-from annotation_processing_utils.utils.write_mws_configs import write_mws_configs
 import argparse
 import logging
 import getpass
