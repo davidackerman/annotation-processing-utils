@@ -6,11 +6,11 @@ import os
 import pandas as pd
 import matplotlib.pyplot as plt
 from itertools import product
-
 from annotation_processing_utils.process.training_validation_test_roi_calculator import (
     TrainingValidationTestRoiCalculator,
 )
-
+import json
+from ..cli.cluster_submission import dict_to_suffix
 
 class GetBest:
     def __init__(self, submission_yaml_path):
@@ -25,7 +25,7 @@ class GetBest:
             iterations_step,
         ) = self.submission_info["iterations"]
         self.iterations = range(iterations_start, iterations_end + 1, iterations_step)
-        self.postprocessing_suffixes = self.submission_info["postprocessing_suffixes"]
+        self.postprocessing_sweep = self.submission_info["postprocessing_sweep"]
 
     def get_combined_df(self):
         combined_df = pd.DataFrame(
@@ -53,16 +53,16 @@ class GetBest:
             for (
                 run,
                 iteration,
-                postprocessing_suffix,
+                current_postprocessing_sweep,
                 validation_or_test,
             ) in product(
                 self.runs,
                 self.iterations,
-                self.postprocessing_suffixes,
+                self.postprocessing_sweep,
                 ["validation", "test"],
             ):
                 for roi_name in rois_dict[validation_or_test].keys():
-                    output_directory = f"{metrics_base_path}/{self.yaml_name}/{validation_or_test}/{run}/{roi_name}/iteration_{iteration}{postprocessing_suffix}_segs"
+                    output_directory = f"{metrics_base_path}/{self.yaml_name}/{validation_or_test}/{run}/{roi_name}/iteration_{iteration}_{dict_to_suffix(current_postprocessing_sweep)}"
                     if not os.path.exists(f"{output_directory}/scores.json"):
                         raise Exception(f"Path {output_directory} does not exist")
 
@@ -121,7 +121,7 @@ class GetBest:
 
             for run in self.runs:
                 for iteration in self.iterations:
-                    for postprocessing_suffix in self.postprocessing_suffixes:
+                    for current_postprocessing_sweep in self.postprocessing_sweep:
                         combined_dicts = {
                             "validation": {
                                 "combined": {
@@ -144,7 +144,7 @@ class GetBest:
                         }
                         for validation_or_test in ["validation", "test"]:
                             for roi_name in rois_dict[validation_or_test].keys():
-                                output_directory = f"{metrics_base_path}/{self.yaml_name}/{validation_or_test}/{run}/{roi_name}/iteration_{iteration}{postprocessing_suffix}_segs"
+                                output_directory = f"{metrics_base_path}/{self.yaml_name}/{validation_or_test}/{run}/{roi_name}/iteration_{iteration}_{dict_to_suffix(current_postprocessing_sweep)}"
                                 if not os.path.exists(
                                     f"{output_directory}/scores.json"
                                 ):
@@ -160,7 +160,7 @@ class GetBest:
                             combined_dict = combined_dicts[validation_or_test]
                             if len(combined_dict["combined"]["average_f1_score"]) == 0:
                                 continue
-
+                            
                             combined_dict["combined"]["f1_score"] = combined_dict[
                                 "combined"
                             ]["tp"] / (
@@ -199,14 +199,15 @@ class GetBest:
                             previous_best_f1_score = combined_dicts["validation"][
                                 "combined"
                             ]["f1_score"]
-                            print(
-                                combined_dicts["validation"]["combined"],
-                                combined_dicts["test"]["combined"],
-                                combined_dicts["validation"],
-                                combined_dicts["test"],
-                                run,
-                                iteration,
-                            )
+                            import json
+
+                            print("Total Validation: ", json.dumps(combined_dicts["validation"]["combined"], indent=4))
+                            print("Total Test: ", json.dumps(combined_dicts["test"]["combined"], indent=4))
+                            print("Validation Details: ", json.dumps(combined_dicts["validation"], indent=4))
+                            print("Test Details: ", json.dumps(combined_dicts["test"], indent=4))
+                            print("Run: ", run)
+                            print("Iteration: ", iteration)
+                            print("Postprocessing: ", current_postprocessing_sweep)
         return failed_paths
 
     def plot_f1_scores(
