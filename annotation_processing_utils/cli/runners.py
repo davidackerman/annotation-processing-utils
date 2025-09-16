@@ -1,10 +1,13 @@
 from datetime import datetime
+from html import parser
 import os
 from annotation_processing_utils.utils.parse_data_path import parse_data_path
-
+from annotation_processing_utils.utils.write_mws_configs import write_mws_configs
 import argparse
 import logging
 import getpass
+import json
+import ast
 
 logger: logging.Logger = logging.getLogger(name=__name__)
 
@@ -72,10 +75,90 @@ def run_inference():
 
 
 def run_mws():
-    from annotation_processing_utils.postprocess.rusty_mws_processor import rusty_mws_processor
+
+    from annotation_processing_utils.postprocess.mws import mws
+    import numpy as np
 
     parser = argparse.ArgumentParser(
         description="Run mutex watershed segmentation for an affinities dataset"
+    )
+    parser.add_argument(
+        "--affinities_path", type=str, help="Path to the affinities", required=True
+    )
+    parser.add_argument(
+        "--segmentation_path",
+        type=str,
+        help="Output path for segmentations",
+        required=True,
+    )
+    parser.add_argument(
+        "--minimum_volume_nm_3",
+        type=int,
+        help="Minimum volume in nm^3",
+        required=False,
+        default=0,
+    )
+    parser.add_argument(
+        "--maximum_volume_nm_3",
+        type=float,
+        help="Maximum volume in nm^3",
+        required=False,
+        default=np.inf,
+    )
+    parser.add_argument(
+        "--adjacent_edge_bias",
+        type=float,
+        help="Bias for adjacent edges",
+        required=False,
+        default=-0.4,
+    )
+    parser.add_argument(
+        "--lr_biases",
+        type=float,
+        nargs="+",  # one or more numbers
+        metavar="F",
+        help="Bias(es) for long-range edges (one or more floats).",
+        default=[-0.24, -0.72],
+    )
+
+    parser.add_argument(
+        "--filter_val",
+        type=float,
+        help="Filter value for merged object affinities",
+        required=False,
+        default=0.5,
+    )
+
+    parser.add_argument(
+        "--mask_config",
+        default=None,
+        type=str,
+        help="Mask if applicable (where a 0 indicates a region to ignore)",
+        required=False,
+    )
+    args = parser.parse_args()
+    mask_config = args.mask_config
+    if mask_config is not None:
+        mask_config = json.loads(mask_config)
+    mws(
+        args.affinities_path,
+        args.segmentation_path,
+        args.minimum_volume_nm_3,
+        args.maximum_volume_nm_3,
+        args.adjacent_edge_bias,
+        args.lr_biases,
+        args.filter_val,
+        mask_config,
+    )
+
+
+def run_rusty_mws_processor():
+    from annotation_processing_utils.postprocess.rusty_mws_processor import (
+        rusty_mws_processor,
+    )
+
+    parser = argparse.ArgumentParser(
+        description="Run rusty mutex watershed segmentation for an affinities dataset"
     )
     parser.add_argument(
         "--affinities_path", type=str, help="Path to the affinities", required=True
