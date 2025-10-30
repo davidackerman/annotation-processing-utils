@@ -26,6 +26,7 @@ class RoiToSplitInVoxels:
         split_dimension=None,
         keep_if_empty=False,
         type_if_do_not_split="validation",
+        shrink_to_fit_annotations=False,
     ):
         dims = ["z", "y", "x"]
         roi = Roi(roi_start, roi_end - roi_start)
@@ -37,6 +38,7 @@ class RoiToSplitInVoxels:
             dims.index(split_dimension) if split_dimension in dims else split_dimension
         )
         self.keep_if_empty = keep_if_empty
+        self.shrink_to_fit_annotations = shrink_to_fit_annotations
         if self.split_dimension == "do_not_split":
             self.type_if_do_not_split = type_if_do_not_split
 
@@ -79,10 +81,15 @@ class TrainingValidationTestRoiCalculator:
                 for roi_type, roi_infos in split_method_values.items():
                     for roi_info in roi_infos:
                         roi_name = roi_info["roi_name"]
+                        shrink_to_fit_annotations = roi_info.get(
+                            "shrink_to_fit_annotations", False
+                        )
                         annotation_csv = roi_info["annotation_csv"]
                         self.annotation_csvs.append(annotation_csv)
                         self.rois_to_split_in_voxels[roi_type][roi_name] = (
-                            self.__get_roi_to_split_from_annotation_csv(annotation_csv)
+                            self.__get_roi_to_split_from_annotation_csv(
+                                annotation_csv, shrink_to_fit_annotations
+                            )
                         )
         self.__get_all_annotation_centers_voxels()
 
@@ -110,6 +117,11 @@ class TrainingValidationTestRoiCalculator:
                         if "type_if_do_not_split" in roi_info
                         else "validation"
                     )
+                    shrink_to_fit_annotations = (
+                        roi_info["shrink_to_fit_annotations"]
+                        if "shrink_to_fit_annotations" in roi_info
+                        else False
+                    )
 
                     for idx, dim in enumerate(["z", "y", "x"]):
                         dim_start, dim_end = roi_info[dim].split("-")
@@ -122,6 +134,7 @@ class TrainingValidationTestRoiCalculator:
                         split_dimension,
                         keep_if_empty,
                         type_if_do_not_split,
+                        shrink_to_fit_annotations=shrink_to_fit_annotations,
                     )
                     if self.__roi_is_not_empty(roi_to_split_in_voxels.roi):
                         self.rois_to_split_in_voxels[roi_type][
@@ -171,7 +184,9 @@ class TrainingValidationTestRoiCalculator:
         )
         return np.sum(valid_annotations) > 0
 
-    def __get_roi_to_split_from_annotation_csv(self, annotation_csv):
+    def __get_roi_to_split_from_annotation_csv(
+        self, annotation_csv, shrink_to_fit_annotations=False
+    ):
         df = pd.read_csv(annotation_csv)
         (
             annotation_starts,
@@ -182,7 +197,12 @@ class TrainingValidationTestRoiCalculator:
         annotation_endpoints = np.concatenate((annotation_starts, annotation_ends))
         roi_start = np.ceil(np.min(annotation_endpoints, axis=0)).astype(int)
         roi_end = np.floor(np.max(annotation_endpoints, axis=0)).astype(int)
-        return RoiToSplitInVoxels(roi_start, roi_end, resolution=1)
+        return RoiToSplitInVoxels(
+            roi_start,
+            roi_end,
+            resolution=1,
+            shrink_to_fit_annotations=shrink_to_fit_annotations,
+        )
 
     def __get_valid_annotations(self, roi: Roi, annotation_centers):
         # check annotations are within region
@@ -231,6 +251,7 @@ class TrainingValidationTestRoiCalculator:
         annotation_ends,
         split_dimension,
         desired_ratio=0.5,
+        shrink_to_fit_annotations=False,
     ):
         first_roi_end = np.array(roi.end)
         second_roi_start = np.array(roi.begin)
@@ -260,19 +281,19 @@ class TrainingValidationTestRoiCalculator:
                     )
         first_roi = self.__roi_from_bounding_box(roi.begin, first_roi_end)
         second_roi = self.__roi_from_bounding_box(second_roi_start, roi.end)
-
-        # first_roi = self.__get_minimal_bounding_roi(
-        #     self.__roi_from_bounding_box(roi.begin, first_roi_end),
-        #     annotation_starts,
-        #     annotation_centers,
-        #     annotation_ends,
-        # )
-        # second_roi = self.__get_minimal_bounding_roi(
-        #     self.__roi_from_bounding_box(second_roi_start, roi.end),
-        #     annotation_starts,
-        #     annotation_centers,
-        #     annotation_ends,
-        # )
+        if shrink_to_fit_annotations:
+            first_roi = self.__get_minimal_bounding_roi(
+                self.__roi_from_bounding_box(roi.begin, first_roi_end),
+                annotation_starts,
+                annotation_centers,
+                annotation_ends,
+            )
+            second_roi = self.__get_minimal_bounding_roi(
+                self.__roi_from_bounding_box(second_roi_start, roi.end),
+                annotation_starts,
+                annotation_centers,
+                annotation_ends,
+            )
         return (num_kept_annotations, first_roi, second_roi)
 
     def split_validation_test_roi(
@@ -284,6 +305,7 @@ class TrainingValidationTestRoiCalculator:
         split_dimension=None,
         validation_test_split_ratio=1,
         max_num_kept_annotations=0,
+        shrink_to_fit_annotations=False,
     ):
         if split_dimension is not None:
             split_dimensions_to_check = [split_dimension]
@@ -305,6 +327,7 @@ class TrainingValidationTestRoiCalculator:
                 annotation_ends,
                 split_dimension=current_split_dimension,
                 desired_ratio=validation_test_split_ratio,
+                shrink_to_fit_annotations=shrink_to_fit_annotations,
             )
 
             if num_kept_annotations > max_num_kept_annotations:
@@ -322,6 +345,7 @@ class TrainingValidationTestRoiCalculator:
         annotation_ends,
         training_split_ratio=0.75 / 0.25,
         validation_test_split_ratio=1,
+        shrink_to_fit_annotations=False,
     ):
         max_num_kept_annotations = 0
         # do it in x,y,z order [2,1,0] to be consistent with previous iteration of this code
@@ -333,6 +357,7 @@ class TrainingValidationTestRoiCalculator:
                 annotation_ends,
                 first_split_dimension,
                 desired_ratio=training_split_ratio,
+                shrink_to_fit_annotations=shrink_to_fit_annotations,
             )
 
             (
@@ -346,6 +371,7 @@ class TrainingValidationTestRoiCalculator:
                 annotation_ends,
                 validation_test_split_ratio=validation_test_split_ratio,
                 max_num_kept_annotations=max_num_kept_annotations,
+                shrink_to_fit_annotations=shrink_to_fit_annotations,
             )
 
             if num_kept_annotations > max_num_kept_annotations:
@@ -375,6 +401,7 @@ class TrainingValidationTestRoiCalculator:
                 self.all_annotation_ends_voxels,
                 training_split_ratio,
                 validation_test_split_ratio,
+                shrink_to_fit_annotations=roi_to_split.shrink_to_fit_annotations,
             )
             self.rois_dict["training"][roi_to_split_name] = (
                 best_training_roi * self.resolution
@@ -400,6 +427,7 @@ class TrainingValidationTestRoiCalculator:
                     self.all_annotation_ends_voxels,
                     split_dimension=roi_to_split.split_dimension,
                     validation_test_split_ratio=validation_test_split_ratio,
+                    shrink_to_fit_annotations=roi_to_split.shrink_to_fit_annotations,
                 )
                 self.rois_dict["test"][roi_to_split_name] = (
                     best_test_roi * self.resolution
@@ -464,12 +492,17 @@ class TrainingValidationTestRoiCalculator:
         viewer = neuroglancer.Viewer()
         with viewer.txn() as s:
             is_first = True
-            for split_type, csvs in roi_info["annotations"].items():
+            for split_method, split_method_values in roi_info["annotations"].items():
+                if split_method == "split_automatically":
+                    for _, roi_infos in split_method_values.items():
+                        csvs = [roi_info["annotation_csv"] for roi_info in roi_infos]
+                else:
+                    csvs = split_method_values
                 for csv in csvs:
                     is_first = False
                     df = pd.read_csv(csv)
                     layer_name = (
-                        split_type + "_" + os.path.basename(csv).split(".csv")[0]
+                        split_method + "_" + os.path.basename(csv).split(".csv")[0]
                     )
                     neuroglancer_url = df["neuroglancer url"][0]
                     state = parse_url(neuroglancer_url)
