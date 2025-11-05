@@ -1,38 +1,32 @@
+import warnings as _warnings
+
+_warnings.filterwarnings("ignore", message="IProgress not found")
+
 import numpy as np
 import pandas as pd
 import zarr
 from tqdm import tqdm
 from numcodecs.gzip import GZip
 import os
-
-import socket
-import neuroglancer
-import numpy as np
-
-import neuroglancer
-import neuroglancer.cli
 import struct
-import os
-import struct
-import numpy as np
 import json
-import pandas as pd
-from tqdm import tqdm
 import shutil
-from annotation_processing_utils.utils.bresenham3D import bresenham3DWithMask
-
 import warnings
+import itertools
+import pickle
+import getpass
+
+from annotation_processing_utils.utils.bresenham3D import bresenham3DWithMask
 from .training_validation_test_roi_calculator import TrainingValidationTestRoiCalculator
 from funlib.persistence import open_ds
-import itertools
-from neuroglancer.url_state import parse_url
-from ..utils.zarr_util import create_multiscale_dataset
-import pickle
 from funlib.geometry import Coordinate
-from ..utils.dacapo_util import DacapoRunBuilder
-from dacapo.experiments.starts import StartConfig
-import getpass
-from dacapo.experiments.starts import CosemStartConfig
+from ..utils.zarr_util import (
+    create_multiscale_dataset,
+    create_multiscale_dataset_with_tensorstore,
+)
+
+# Heavy imports - lazy loaded when needed
+# neuroglancer, dacapo imports moved to functions that use them
 
 
 class VoxelNmConverter:
@@ -154,6 +148,10 @@ class CylindricalAnnotations:
         # 36x36x36 is shape of region used to caluclate loss,so we need to make sure that the center is at least the diagonal away from the validation/test rois
         self.longest_box_diagonal = int(np.ceil(np.sqrt(3 * (36**2)))) + 1
         self.debug = debug  # if true, only use first 100 annotations
+
+        # Lazy import neuroglancer only when needed
+        import neuroglancer
+
         neuroglancer.set_server_bind_address("0.0.0.0")
 
     def in_cylinder(self, end_1, end_2, radius):
@@ -251,16 +249,19 @@ class CylindricalAnnotations:
         return negative_example_centers
 
     def write_annotations_as_cylinders_and_get_intersections(self, radius):
-        # get all pd voxels and all overlapping/intersecting voxels between multiple pd
+        # Sequential processing - faster than parallel due to low per-annotation overhead
         self.all_annotation_voxels = []
         self.all_annotation_voxels_set = set()
         self.intersection_voxels_set = set()
+
+        # Compute cylinder voxels and intersections
         for annotation_start, annotation_end in tqdm(
             zip(self.annotation_starts, self.annotation_ends),
+            desc="Computing cylinder voxels and intersections",
             total=len(self.annotation_starts),
         ):
             voxels_in_cylinder = self.in_cylinder(
-                annotation_start, annotation_end, radius=radius
+                annotation_start, annotation_end, radius
             )
             self.all_annotation_voxels.append(list(voxels_in_cylinder))
             self.intersection_voxels_set.update(
@@ -268,8 +269,8 @@ class CylindricalAnnotations:
             )
             self.all_annotation_voxels_set.update(voxels_in_cylinder)
 
-        # repeat but now will write out the relevant voxels with appropriate id
-        ds = create_multiscale_dataset(
+        # Create dataset with tensorstore for fast writing
+        ds = create_multiscale_dataset_with_tensorstore(
             output_path=f"{self.output_gt_zarr}/{self.dataset}",
             dtype="u2",
             voxel_size=self.voxel_size,
@@ -280,79 +281,110 @@ class CylindricalAnnotations:
 
         all_annotation_id = 1
         annotation_id = 1
-        # self.all_annotation_voxels_set -= self.intersection_voxels_set
-        for annotation_start, annotation_end in tqdm(
-            zip(self.annotation_starts, self.annotation_ends),
+        shape = ds.data.shape
+
+        # Collect all voxel assignments for batch writing
+        all_voxel_coords = []
+        all_voxel_values = []
+
+        for annotation_start, annotation_end, voxels_in_cylinder in tqdm(
+            zip(
+                self.annotation_starts,
+                self.annotation_ends,
+                self.all_annotation_voxels,
+            ),
+            desc="Collecting voxel assignments",
             total=len(self.annotation_starts),
         ):
-            voxels_in_cylinder = (
-                self.in_cylinder(annotation_start, annotation_end, radius=radius)
-                - self.intersection_voxels_set
-            )
-            if len(voxels_in_cylinder) > 0:
-                voxels_in_cylinder = np.array(list(voxels_in_cylinder))
-                shape = ds.data.shape
+            try:
+                voxels_in_cylinder = set(voxels_in_cylinder)
+                voxels_in_cylinder -= self.intersection_voxels_set
 
-                # Boolean mask for voxels that are inside the valid range
-                valid_mask = (
-                    (voxels_in_cylinder[:, 0] >= 0)
-                    & (voxels_in_cylinder[:, 0] < shape[0])
-                    & (voxels_in_cylinder[:, 1] >= 0)
-                    & (voxels_in_cylinder[:, 1] < shape[1])
-                    & (voxels_in_cylinder[:, 2] >= 0)
-                    & (voxels_in_cylinder[:, 2] < shape[2])
-                )
+                if len(voxels_in_cylinder) > 0:
+                    voxels_in_cylinder = np.array(list(voxels_in_cylinder))
 
-                # Keep only the valid ones
-                valid_voxels = voxels_in_cylinder[valid_mask]
+                    # Boolean mask for voxels that are inside the valid range
+                    valid_mask = (
+                        (voxels_in_cylinder[:, 0] >= 0)
+                        & (voxels_in_cylinder[:, 0] < shape[0])
+                        & (voxels_in_cylinder[:, 1] >= 0)
+                        & (voxels_in_cylinder[:, 1] < shape[1])
+                        & (voxels_in_cylinder[:, 2] >= 0)
+                        & (voxels_in_cylinder[:, 2] < shape[2])
+                    )
 
-                # Perform the assignment safely
-                ds.data[
-                    valid_voxels[:, 0],
-                    valid_voxels[:, 1],
-                    valid_voxels[:, 2],
-                ] = annotation_id
-                annotation_id += 1
-                all_annotation_id += 1
-            else:
+                    # Keep only the valid ones
+                    voxels_in_cylinder = voxels_in_cylinder[valid_mask]
+
+                    if len(voxels_in_cylinder) > 0:
+                        # Collect for batch write
+                        all_voxel_coords.append(voxels_in_cylinder)
+                        all_voxel_values.append(
+                            np.full(len(voxels_in_cylinder), annotation_id, dtype="u2")
+                        )
+                        annotation_id += 1
+                        all_annotation_id += 1
+                    else:
+                        self.empty_annotations.append(all_annotation_id)
+                        all_annotation_id += 1
+                        warnings.warn(
+                            f"Empty annotation #{all_annotation_id-1} ({annotation_start}-{annotation_end}) will be ignored"
+                        )
+                else:
+                    self.empty_annotations.append(all_annotation_id)
+                    all_annotation_id += 1
+                    warnings.warn(
+                        f"Empty annotation #{all_annotation_id-1} ({annotation_start}-{annotation_end}) will be ignored"
+                    )
+            except Exception as e:
                 self.empty_annotations.append(all_annotation_id)
                 all_annotation_id += 1
                 warnings.warn(
-                    f"Empty annotation #{all_annotation_id-1} ({annotation_start}-{annotation_end}) will be ignored"
+                    f"Error processing annotation #{all_annotation_id-1}: {e}"
                 )
+                continue
+
+        # Batch write all voxels at once using tensorstore - much faster!
+        if all_voxel_coords:
+            print(f"Writing {len(all_voxel_coords)} annotations in batch...")
+            all_coords = np.vstack(all_voxel_coords)
+            all_values = np.concatenate(all_voxel_values)
+            ds.data[
+                all_coords[:, 0],
+                all_coords[:, 1],
+                all_coords[:, 2],
+            ] = all_values
+            # Set world-readable permissions after writing
+            ds.set_permissions()
 
     def write_intersection_mask(self):
-        create_multiscale_dataset(
+        ds = create_multiscale_dataset_with_tensorstore(
             output_path=f"{self.output_mask_zarr}/{self.dataset}",
             dtype="u1",
             voxel_size=self.voxel_size,
             total_roi=self.raw_dataset.roi,
             write_size=self.voxel_size * 128,
             delete=True,
+            fill_value=1,  # Set fill_value=1 in metadata only (sparse storage)
         )
-        zarray_metadata_path = f"{self.output_mask_zarr}/{self.dataset}/s0/.zarray"
-        # Load the .zarray metadata
-        with open(zarray_metadata_path, "r") as f:
-            zarray_metadata = json.load(f)
 
-        zarray_metadata["fill_value"] = 1
-
-        # Save the updated metadata back to the .zarray file
-        with open(zarray_metadata_path, "w") as f:
-            json.dump(zarray_metadata, f, indent=4)
-
-        ds = open_ds(self.output_mask_zarr, self.dataset + "/s0", mode="a")
-
+        # Only write the zeros (intersection voxels)
+        # All other voxels will read as 1 due to fill_value in metadata
         intersection_voxels = np.array(list(self.intersection_voxels_set))
         if len(intersection_voxels) > 0:
+            print(
+                f"Writing {len(intersection_voxels)} intersection mask voxels (zeros)..."
+            )
             ds.data[
                 intersection_voxels[:, 0],
                 intersection_voxels[:, 1],
                 intersection_voxels[:, 2],
             ] = 0
+        # Set world-readable permissions after writing
+        ds.set_permissions()
 
     def write_training_points(self):
-        ds = create_multiscale_dataset(
+        ds = create_multiscale_dataset_with_tensorstore(
             output_path=f"{self.output_training_points_zarr}/{self.dataset}",
             dtype="u1",
             voxel_size=self.voxel_size,
@@ -360,19 +392,25 @@ class CylindricalAnnotations:
             write_size=self.voxel_size * 128,
             delete=True,
         )
-        # convert list of training point tuples to numpy array
-        for current_training_points in tqdm(self.training_points_by_object):
-            current_training_points_voxels = (
-                np.array(current_training_points) / self.voxel_size[0]
-            )
-            current_training_points_voxels = current_training_points_voxels.astype(int)
-            ds.data[
-                current_training_points_voxels[:, 0],
-                current_training_points_voxels[:, 1],
-                current_training_points_voxels[:, 2],
-            ] = 1
 
+        # Flatten all training points and convert to voxel coordinates in one go
         self.training_points = list(itertools.chain(*self.training_points_by_object))
+
+        if len(self.training_points) > 0:
+            print(f"Writing {len(self.training_points)} training points in batch...")
+            # Convert all points at once - much faster than per-object
+            all_training_points_voxels = (
+                np.array(self.training_points) / self.voxel_size[0]
+            ).astype(int)
+
+            # Single batch write instead of loop
+            ds.data[
+                all_training_points_voxels[:, 0],
+                all_training_points_voxels[:, 1],
+                all_training_points_voxels[:, 2],
+            ] = 1
+        # Set world-readable permissions after writing
+        ds.set_permissions()
 
     def get_pseudorandom_training_centers(self, random_shift_voxels=None):
         def point_is_valid_center_for_current_roi(pt, edge_length, offset, shape):
@@ -668,6 +706,8 @@ class CylindricalAnnotations:
         print(f"annotations: {precomputed_path}")
 
     def visualize_removed_annotations(self, roi, radius):
+        import neuroglancer
+
         def add_segmentation_layer(state, data, name):
             dimensions = neuroglancer.CoordinateSpace(
                 names=["z", "y", "x"], units="nm", scales=3 * [self.voxel_size[0]]
@@ -750,6 +790,9 @@ class CylindricalAnnotations:
             f.write(url)
 
     def get_neuroglancer_url(self):
+        import neuroglancer
+        from neuroglancer.url_state import parse_url
+
         state = parse_url(self.roi_calculator.neuroglancer_url)
         for name, zarr_path in zip(
             ["mask", "annotations_as_cylinders", "training_points"],
@@ -855,8 +898,14 @@ class CylindricalAnnotations:
         snapshot_interval=10000,
         iterations=500000,
         repetitions=3,
-        start_config=CosemStartConfig("setup04", "1820500"),
+        start_config=None,
     ):
+        from ..utils.dacapo_util import DacapoRunBuilder
+        from dacapo.experiments.starts import CosemStartConfig
+
+        if start_config is None:
+            start_config = CosemStartConfig("setup04", "1820500")
+
         DacapoRunBuilder(
             self.dataset,
             self.organelle,
@@ -888,8 +937,14 @@ class CylindricalAnnotations:
         snapshot_interval=10000,
         iterations=500000,
         repetitions=3,
-        start_config=CosemStartConfig("setup04", "1820500"),
+        start_config=None,
     ):
+        from ..utils.dacapo_util import DacapoRunBuilder
+        from dacapo.experiments.starts import CosemStartConfig
+
+        if start_config is None:
+            start_config = CosemStartConfig("setup04", "1820500")
+
         DacapoRunBuilder(
             datasplit_config=datasplit_config,
             base_lr=base_lr,
