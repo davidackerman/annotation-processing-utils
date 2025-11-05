@@ -48,14 +48,18 @@ class TrainingValidationTestRoiCalculator:
     def __init__(
         self,
         training_validation_test_roi_info_yaml,
+        scale_coordinates=np.array([1, 1, 1]),
     ):
         self.training_validation_test_roi_info_yaml = (
             training_validation_test_roi_info_yaml
         )
+        self.scale_coordinates = scale_coordinates
+
         self.rois_dict = {"training": {}, "validation": {}, "test": {}}
         self.__extract_training_validation_test_info(
             training_validation_test_roi_info_yaml
         )
+
         neuroglancer.set_server_bind_address("0.0.0.0")
 
     def __extract_training_validation_test_info(
@@ -78,15 +82,15 @@ class TrainingValidationTestRoiCalculator:
             if split_method == "split_by_rois":
                 self.annotation_csvs.extend(split_method_values)
             elif split_method == "split_automatically":
-                for roi_type, roi_infos in split_method_values.items():
-                    for roi_info in roi_infos:
+                for split_type, split_type_values in split_method_values.items():
+                    for roi_info in split_type_values:
                         roi_name = roi_info["roi_name"]
                         shrink_to_fit_annotations = roi_info.get(
                             "shrink_to_fit_annotations", False
                         )
                         annotation_csv = roi_info["annotation_csv"]
                         self.annotation_csvs.append(annotation_csv)
-                        self.rois_to_split_in_voxels[roi_type][roi_name] = (
+                        self.rois_to_split_in_voxels[split_type][roi_name] = (
                             self.__get_roi_to_split_from_annotation_csv(
                                 annotation_csv, shrink_to_fit_annotations
                             )
@@ -173,6 +177,8 @@ class TrainingValidationTestRoiCalculator:
             np.array([df["end z (nm)"], df["end y (nm)"], df["end x (nm)"]]).T
             / self.resolution
         )
+        starts = self.scale_coordinates * starts
+        ends = self.scale_coordinates * ends
         centers = (starts + ends) / 2
 
         return starts, ends, centers
@@ -493,9 +499,11 @@ class TrainingValidationTestRoiCalculator:
         with viewer.txn() as s:
             is_first = True
             for split_method, split_method_values in roi_info["annotations"].items():
+                csvs = []
                 if split_method == "split_automatically":
-                    for _, roi_infos in split_method_values.items():
-                        csvs = [roi_info["annotation_csv"] for roi_info in roi_infos]
+                    for split_type, split_type_values in split_method_values.items():
+                        for roi_info in split_type_values:
+                            csvs.append(roi_info["annotation_csv"])
                 else:
                     csvs = split_method_values
                 for csv in csvs:
@@ -509,6 +517,7 @@ class TrainingValidationTestRoiCalculator:
                     for layer in state.layers:
                         if (
                             layer.name == "fibsem-uint8"
+                            or layer.name == "fibsem-uint16"
                             or layer.name == "raw"
                             and is_first
                         ):
