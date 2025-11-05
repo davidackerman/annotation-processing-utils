@@ -86,12 +86,14 @@ class CylindricalAnnotations:
         radius,
         training_validation_test_roi_info_yaml,
         output_annotations_directory=None,
+        output_neuroglancer_link_directory=None,
         output_mask_zarr=None,
         output_gt_zarr=None,
         output_training_points_zarr=None,
         dataset="jrc_22ak351-leaf-3m",
         training_point_selection_mode="all",
         raw_path=None,
+        actual_resolution_of_annotation=None,
         debug=False,
     ):
         np.random.seed(0)  # set seed for consistency of locations
@@ -107,7 +109,8 @@ class CylindricalAnnotations:
             output_training_points_zarr = f"/nrs/cellmap/{self.username}/cellmap/{self.organelle}/training_points.zarr"
         if not output_annotations_directory:
             output_annotations_directory = f"/groups/cellmap/cellmap/{self.username}/neuroglancer_annotations/{self.organelle}"
-
+        if not output_neuroglancer_link_directory:
+            output_neuroglancer_link_directory = f"/nrs/cellmap/{self.username}/cellmap/{self.organelle}/neuroglancer_links"
         if raw_path:
             raw_zarr, raw_dataset_name = split_dataset_path(raw_path)
         else:
@@ -118,20 +121,26 @@ class CylindricalAnnotations:
                 raw_dataset_name = "/volumes/raw/s0"
             elif "recon-1":
                 raw_dataset_name = "/recon-1/em/fibsem-uint8/s0"
-
+        self.actual_resolution_of_annotation = actual_resolution_of_annotation
         self.raw_dataset = open_ds(raw_zarr, raw_dataset_name)
-
+        self.voxel_size = self.raw_dataset.voxel_size
+        self.resolution_ratio = (
+            np.array([1, 1, 1])
+            if self.actual_resolution_of_annotation is None
+            else np.array(self.voxel_size) / self.actual_resolution_of_annotation
+        )
         self.output_mask_zarr = output_mask_zarr
         self.output_gt_zarr = output_gt_zarr
         self.output_training_points_zarr = output_training_points_zarr
         self.output_annotations_directory = (
             output_annotations_directory + "/" + self.dataset
         )
+        self.output_neuroglancer_link_directory = output_neuroglancer_link_directory
         self.empty_annotations = []
         self.radius = radius
 
         self.roi_calculator = TrainingValidationTestRoiCalculator(
-            training_validation_test_roi_info_yaml
+            training_validation_test_roi_info_yaml, self.resolution_ratio
         )
         if self.roi_calculator.resolution / self.raw_dataset.voxel_size[0] == 2:
             raw_dataset_name = raw_dataset_name.replace("/s0", "/s1")
@@ -180,7 +189,6 @@ class CylindricalAnnotations:
         return set(map(tuple, p[is_in_cylinder]))
 
     def extract_annotation_information(self):
-        self.voxel_size = self.raw_dataset.voxel_size
 
         # https://cell-map.slack.com/archives/C04N9JUFQK1/p1683733456153269
 
@@ -210,6 +218,9 @@ class CylindricalAnnotations:
             np.array([df["end z (nm)"], df["end y (nm)"], df["end x (nm)"]]).T
             / self.voxel_size[0]
         )
+
+        self.annotation_starts = self.annotation_starts * self.resolution_ratio
+        self.annotation_ends = self.annotation_ends * self.resolution_ratio
 
     def get_negative_examples(filename="annotations_20230620_221638.csv"):
         negative_examples = pd.read_csv(filename)
@@ -732,6 +743,11 @@ class CylindricalAnnotations:
         )
         url = f"https://neuroglancer-demo.appspot.com/#!%7B%22dimensions%22:%7B%22x%22:%5B1e-9%2C%22m%22%5D%2C%22y%22:%5B1e-9%2C%22m%22%5D%2C%22z%22:%5B1e-9%2C%22m%22%5D%7D%2C%22position%22:%5B0.0%2C0.0%2C0.0%5D%2C%22crossSectionScale%22:1%2C%22projectionScale%22:16384%2C%22layers%22:%5B%7B%22type%22:%22image%22%2C%22source%22:%22n5://https://cellmap-vm1.int.janelia.org/nrs/data/{self.dataset}/{self.dataset}.n5/{self.raw_dataset_name}/%22%2C%22tab%22:%22source%22%2C%22name%22:%22fibsem-uint8%22%7D%2C%7B%22type%22:%22annotation%22%2C%22source%22:%22precomputed://https://cellmap-vm1.int.janelia.org/dm11/{self.username}/neuroglancer_annotations/{self.organelle}/splitting/{self.dataset}/bounding_boxes%22%2C%22tab%22:%22rendering%22%2C%22shader%22:%22%5Cnvoid%20main%28%29%20%7B%5Cn%20%20setColor%28prop_box_color%28%29%5Cn%20%20%20%20%20%20%20%20%20%20%29%3B%5Cn%7D%5Cn%22%2C%22name%22:%22bounding_boxes%22%7D%2C%7B%22type%22:%22segmentation%22%2C%22source%22:%22n5://https://cellmap-vm1.int.janelia.org/nrs/{self.username}/cellmap/{self.organelle}/{self.organelle}.n5/{self.dataset}/%22%2C%22tab%22:%22source%22%2C%22segments%22:%5B%5D%2C%22name%22:%22{self.organelle}%22%7D%2C%7B%22type%22:%22annotation%22%2C%22source%22:%22precomputed://https://cellmap-vm1.int.janelia.org/dm11/{self.username}/neuroglancer_annotations/{annotation_datetime}%22%2C%22tab%22:%22source%22%2C%22name%22:%22{annotation_datetime}%22%7D%5D%2C%22selectedLayer%22:%7B%22visible%22:true%2C%22layer%22:%2220230830_155757%22%7D%2C%22layout%22:%224panel%22%7D"
         print(url)
+        # save url to file
+        with open(
+            f"{self.output_neuroglancer_link_directory}/neuroglancer_view_url.txt", "w"
+        ) as f:
+            f.write(url)
 
     def get_neuroglancer_url(self):
         state = parse_url(self.roi_calculator.neuroglancer_url)
@@ -748,7 +764,9 @@ class CylindricalAnnotations:
                 .replace("/dm11/cellmap", "dm11/")
                 .replace("/prfs/cellmap", "prfs/")
             )
-            zarr_path = "zarr://https://cellmap-vm1.int.janelia.org/" + zarr_path
+            if "s3://:" not in zarr_path:
+                zarr_path = "zarr://https://cellmap-vm1.int.janelia.org/" + zarr_path
+
             state.layers[name] = neuroglancer.SegmentationLayer(
                 source=zarr_path + "/" + self.dataset
             )
@@ -829,6 +847,9 @@ class CylindricalAnnotations:
         self,
         base_lr=2.5e-5,
         batch_size=2,
+        raw_min=None,
+        raw_max=None,
+        raw_path=None,
         lsds_to_affs_weight_ratio=0.5,
         validation_interval=5000,
         snapshot_interval=10000,
@@ -846,6 +867,9 @@ class CylindricalAnnotations:
             validation_rois_dict=self.roi_calculator.rois_dict["validation"],
             base_lr=base_lr,
             batch_size=batch_size,
+            raw_min=raw_min,
+            raw_max=raw_max,
+            raw_path=raw_path,
             lsds_to_affs_weight_ratio=lsds_to_affs_weight_ratio,
             validation_interval=validation_interval,
             snapshot_interval=snapshot_interval,
