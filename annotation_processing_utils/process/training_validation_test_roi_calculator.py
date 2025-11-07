@@ -129,8 +129,8 @@ class TrainingValidationTestRoiCalculator:
 
                     for idx, dim in enumerate(["z", "y", "x"]):
                         dim_start, dim_end = roi_info[dim].split("-")
-                        roi_start[idx] = int(dim_start)
-                        roi_end[idx] = int(dim_end)
+                        roi_start[idx] = int(dim_start) * self.scale_coordinates[idx]
+                        roi_end[idx] = int(dim_end) * self.scale_coordinates[idx]
                     roi_to_split_in_voxels = RoiToSplitInVoxels(
                         roi_start,
                         roi_end,
@@ -215,11 +215,11 @@ class TrainingValidationTestRoiCalculator:
 
         valid_annotations = (
             (annotation_centers[:, 0] >= roi.begin[0])
-            & (annotation_centers[:, 0] <= roi.end[0])
+            & (annotation_centers[:, 0] < roi.end[0])  # Changed from <=
             & (annotation_centers[:, 1] >= roi.begin[1])
-            & (annotation_centers[:, 1] <= roi.end[1])
+            & (annotation_centers[:, 1] < roi.end[1])  # Changed from <=
             & (annotation_centers[:, 2] >= roi.begin[2])
-            & (annotation_centers[:, 2] <= roi.end[2])
+            & (annotation_centers[:, 2] < roi.end[2])  # Changed from <=
         )
         return valid_annotations
 

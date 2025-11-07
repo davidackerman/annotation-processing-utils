@@ -219,6 +219,7 @@ class CylindricalAnnotations:
 
         self.annotation_starts = self.annotation_starts * self.resolution_ratio
         self.annotation_ends = self.annotation_ends * self.resolution_ratio
+        self.annotation_centers = (self.annotation_starts + self.annotation_ends) / 2
 
     def get_negative_examples(filename="annotations_20230620_221638.csv"):
         negative_examples = pd.read_csv(filename)
@@ -601,19 +602,53 @@ class CylindricalAnnotations:
 
             return valid_idxs
 
+        def is_valid_center(center):
+            # is a valid center if it is within one and only one rois_dict["training"]
+            count = 0
+            for roi in self.roi_calculator.rois_dict["training"].values():
+                roi = roi.snap_to_grid(
+                    3 * [self.voxel_size[0]],
+                    mode="shrink",
+                )
+
+                # do this to keep things in voxels for splitting along exact voxel
+                roi /= int(self.voxel_size[0])
+                if all(
+                    center[d] >= roi.offset[d]
+                    and center[d] <= roi.offset[d] + roi.shape[d]
+                    for d in range(3)
+                ):
+                    count += 1
+
+            return count == 1
+
         self.training_points_by_object = []
         self.removed_ids = []
-        for id, cylinder_voxels in tqdm(
-            enumerate(self.all_annotation_voxels), total=len(self.all_annotation_voxels)
+        for id, (cylinder_voxels, center_voxels) in tqdm(
+            enumerate(
+                zip(
+                    self.all_annotation_voxels,
+                    self.roi_calculator.all_annotation_centers_voxels,
+                ),
+            ),
+            total=len(self.all_annotation_voxels),
         ):
             if len(cylinder_voxels) == 0:
                 warnings.warn(f"empty id {id+1}")
                 self.removed_ids.append(id + 1)
                 continue
 
+            if not is_valid_center(center_voxels):
+                self.removed_ids.append(id + 1)
+                continue
+
             found_valid_point = False
             cylinder_voxels = np.array(cylinder_voxels)
-            valid_idxs = get_valid_idxs(cylinder_voxels, self.longest_box_diagonal)
+            # Use 36 since we want to include both the current roi and the neighboring roi boxes
+            valid_idxs = get_valid_idxs(
+                cylinder_voxels,
+                np.ceil(np.sqrt(3 * (36 + random_shift_voxels) ** 2) + 1),
+            )
             if np.sum(valid_idxs) > 0:
                 valid_voxels = cylinder_voxels[valid_idxs]
                 valid_voxels = np.round(valid_voxels * self.voxel_size[0]).astype(int)
@@ -621,7 +656,7 @@ class CylindricalAnnotations:
                     random_shift = random_shift_voxels * self.voxel_size[0]
                     valid_voxels += np.random.randint(
                         -random_shift,
-                        random_shift,
+                        random_shift + 1,
                         size=(len(valid_voxels), 3),
                     )
                 # map cylinder voxels to tuple
