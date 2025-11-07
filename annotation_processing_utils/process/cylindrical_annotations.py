@@ -144,6 +144,9 @@ class CylindricalAnnotations:
             self.output_annotations_directory,
         )
         self.training_point_selection_mode = training_point_selection_mode
+        self.keep_all_valid_training_points = (
+            self.roi_calculator.keep_all_valid_training_points
+        )
 
         # 36x36x36 is shape of region used to caluclate loss,so we need to make sure that the center is at least the diagonal away from the validation/test rois
         self.longest_box_diagonal = int(np.ceil(np.sqrt(3 * (36**2)))) + 1
@@ -603,6 +606,10 @@ class CylindricalAnnotations:
             return valid_idxs
 
         def is_valid_center(center):
+            # If keep_all_valid_training_points is True, skip the training ROI check
+            if self.keep_all_valid_training_points:
+                return True
+
             # is a valid center if it is within one and only one rois_dict["training"]
             count = 0
             for roi in self.roi_calculator.rois_dict["training"].values():

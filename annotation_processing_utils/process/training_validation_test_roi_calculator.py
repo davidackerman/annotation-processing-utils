@@ -76,6 +76,9 @@ class TrainingValidationTestRoiCalculator:
             info = yaml.safe_load(stream)
 
         self.resolution = info["resolution"]
+        self.keep_all_valid_training_points = info.get(
+            "keep_all_valid_training_points", False
+        )
 
         # annotations
         for split_method, split_method_values in info["annotations"].items():
