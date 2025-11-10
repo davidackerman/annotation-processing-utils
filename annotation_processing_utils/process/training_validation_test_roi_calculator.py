@@ -17,6 +17,32 @@ import yaml
 import warnings
 
 
+def drop_close_duplicates_allclose(df, coord_cols, rtol=1e-5, atol=1e-8):
+    """
+    Keep the first occurrence of each point and drop later rows whose
+    coordinates are allclose (per-element) to any kept row.
+    """
+    coords = df[coord_cols].to_numpy(dtype=float)
+    n = len(df)
+    keep = np.ones(n, dtype=bool)
+
+    for i in range(n):
+        if not keep[i]:
+            continue
+
+        # Compare row i with all later rows using allclose-style logic
+        diffs = coords[i + 1 :]
+        # is_close_to_i[j] == True if coords[i+1+j] is allclose to coords[i]
+        is_close_to_i = np.all(
+            np.isclose(diffs, coords[i], rtol=rtol, atol=atol),
+            axis=1,
+        )
+
+        keep[i + 1 :][is_close_to_i] = False
+
+    return df[keep].copy()
+
+
 class RoiToSplitInVoxels:
     def __init__(
         self,
@@ -165,6 +191,18 @@ class TrainingValidationTestRoiCalculator:
         for annotation_csv in self.annotation_csvs:
             dfs.append(pd.read_csv(annotation_csv))
         df = pd.concat(dfs)
+        df = drop_close_duplicates_allclose(
+            df,
+            [
+                "start z (nm)",
+                "start y (nm)",
+                "start x (nm)",
+                "end z (nm)",
+                "end y (nm)",
+                "end x (nm)",
+            ],
+        )
+
         (
             self.all_annotation_starts_voxels,
             self.all_annotation_ends_voxels,
@@ -197,6 +235,17 @@ class TrainingValidationTestRoiCalculator:
         self, annotation_csv, shrink_to_fit_annotations=False
     ):
         df = pd.read_csv(annotation_csv)
+        df = drop_close_duplicates_allclose(
+            df,
+            [
+                "start z (nm)",
+                "start y (nm)",
+                "start x (nm)",
+                "end z (nm)",
+                "end y (nm)",
+                "end x (nm)",
+            ],
+        )
         (
             annotation_starts,
             annotation_ends,
@@ -238,7 +287,8 @@ class TrainingValidationTestRoiCalculator:
         valid_starts = annotation_starts[valid_annotations]
         valid_ends = annotation_ends[valid_annotations]
         valid_endpoints = np.concatenate((valid_starts, valid_ends))
-
+        if len(valid_endpoints) == 0:
+            return roi  # nothing to fit to
         roi_start = np.maximum(
             np.array(roi.begin),
             np.floor(np.min(valid_endpoints, axis=0)).astype(int),
@@ -288,8 +338,10 @@ class TrainingValidationTestRoiCalculator:
                     num_kept_annotations = (
                         annotations_in_first_half + annotations_in_second_half
                     )
+
         first_roi = self.__roi_from_bounding_box(roi.begin, first_roi_end)
         second_roi = self.__roi_from_bounding_box(second_roi_start, roi.end)
+
         if shrink_to_fit_annotations:
             first_roi = self.__get_minimal_bounding_roi(
                 self.__roi_from_bounding_box(roi.begin, first_roi_end),
@@ -425,6 +477,13 @@ class TrainingValidationTestRoiCalculator:
         ].items():
             if roi_to_split.split_dimension == "do_not_split":
                 # then it was deemed too small to split so we just use it as validation if type_if_do_not_split hasn't been specified
+                if roi_to_split.shrink_to_fit_annotations:
+                    roi_to_split.roi = self.__get_minimal_bounding_roi(
+                        roi_to_split.roi,
+                        self.all_annotation_starts_voxels,
+                        self.all_annotation_centers_voxels,
+                        self.all_annotation_ends_voxels,
+                    )
                 self.rois_dict[roi_to_split.type_if_do_not_split][roi_to_split_name] = (
                     roi_to_split.roi * self.resolution
                 )
@@ -465,6 +524,7 @@ class TrainingValidationTestRoiCalculator:
             "validation": (0, 0, 255),
             "test": (255, 0, 0),
         }
+
         for id, (roi_name, roi_color) in enumerate(roi_name_to_color_dict.items()):
             rois = self.rois_dict[roi_name]
             for roi in rois.values():
@@ -475,7 +535,6 @@ class TrainingValidationTestRoiCalculator:
                     box_color=roi_color,
                 )
                 annotation_writer.write(f"{output_directory}")
-
         precomputed_path = output_directory
         precomputed_path = precomputed_path.replace(
             "/nrs/cellmap", "precomputed://https://cellmap-vm1.int.janelia.org/nrs/"
@@ -512,6 +571,17 @@ class TrainingValidationTestRoiCalculator:
                 for csv in csvs:
                     is_first = False
                     df = pd.read_csv(csv)
+                    df = drop_close_duplicates_allclose(
+                        df,
+                        [
+                            "start z (nm)",
+                            "start y (nm)",
+                            "start x (nm)",
+                            "end z (nm)",
+                            "end y (nm)",
+                            "end x (nm)",
+                        ],
+                    )
                     layer_name = (
                         split_method + "_" + os.path.basename(csv).split(".csv")[0]
                     )
