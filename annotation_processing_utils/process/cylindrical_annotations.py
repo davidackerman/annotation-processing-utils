@@ -17,13 +17,17 @@ import pickle
 import getpass
 
 from annotation_processing_utils.utils.bresenham3D import bresenham3DWithMask
-from .training_validation_test_roi_calculator import TrainingValidationTestRoiCalculator
+from .training_validation_test_roi_calculator import (
+    TrainingValidationTestRoiCalculator,
+    drop_close_duplicates_allclose,
+)
 from funlib.persistence import open_ds
 from funlib.geometry import Coordinate
 from ..utils.zarr_util import (
     create_multiscale_dataset,
     create_multiscale_dataset_with_tensorstore,
 )
+
 
 # Heavy imports - lazy loaded when needed
 # neuroglancer, dacapo imports moved to functions that use them
@@ -105,6 +109,10 @@ class CylindricalAnnotations:
             output_annotations_directory = f"/groups/cellmap/cellmap/{self.username}/neuroglancer_annotations/{self.organelle}"
         if not output_neuroglancer_link_directory:
             output_neuroglancer_link_directory = f"/nrs/cellmap/{self.username}/cellmap/{self.organelle}/neuroglancer_links"
+
+        # Store raw_path for later use in neuroglancer URL generation
+        self.raw_path = raw_path
+
         if raw_path:
             raw_zarr, raw_dataset_name = split_dataset_path(raw_path)
         else:
@@ -123,6 +131,7 @@ class CylindricalAnnotations:
             if self.actual_resolution_of_annotation is None
             else np.array(self.voxel_size) / self.actual_resolution_of_annotation
         )
+
         self.output_mask_zarr = output_mask_zarr
         self.output_gt_zarr = output_gt_zarr
         self.output_training_points_zarr = output_training_points_zarr
@@ -198,15 +207,16 @@ class CylindricalAnnotations:
             dfs.append(pd.read_csv(annotation_csv))
         df = pd.concat(dfs)
         # remove duplicate rows from dataframe
-        df = df.drop_duplicates(
-            subset=[
+        df = drop_close_duplicates_allclose(
+            df,
+            coord_cols=[
                 "start z (nm)",
                 "start y (nm)",
                 "start x (nm)",
                 "end z (nm)",
                 "end y (nm)",
                 "end x (nm)",
-            ]
+            ],
         )
         # # use only first 500 annotations
         if self.debug:
@@ -836,6 +846,71 @@ class CylindricalAnnotations:
         from neuroglancer.url_state import parse_url
 
         state = parse_url(self.roi_calculator.neuroglancer_url)
+
+        # Make all original annotation layers not visible
+        for layer in state.layers:
+            if hasattr(layer, "visible"):
+                layer.visible = False
+        # Make ROIs visible
+        if "rois" in state.layers and hasattr(state.layers["rois"], "visible"):
+            state.layers["rois"].visible = True
+
+        # If raw_path is provided, add it first (remove s0 scale if present)
+        if self.raw_path:
+            raw_path_for_neuroglancer = self.raw_path.replace("/s0", "").replace(
+                "/s1", ""
+            )
+            # Convert path to neuroglancer format
+            raw_path_for_neuroglancer = (
+                raw_path_for_neuroglancer.replace("/nrs/cellmap/data", "nrs/data")
+                .replace("/nrs/cellmap", "nrs/")
+                .replace("/dm11/cellmap", "dm11/")
+                .replace("/prfs/cellmap", "prfs/")
+            )
+
+            if "s3://:" not in raw_path_for_neuroglancer:
+                # Determine format based on file extension in path
+                if ".zarr" in raw_path_for_neuroglancer:
+                    raw_path_for_neuroglancer = (
+                        "zarr://https://cellmap-vm1.int.janelia.org/"
+                        + raw_path_for_neuroglancer
+                    )
+                elif ".n5" in raw_path_for_neuroglancer:
+                    raw_path_for_neuroglancer = (
+                        "n5://https://cellmap-vm1.int.janelia.org/"
+                        + raw_path_for_neuroglancer
+                    )
+
+            # Use actual_resolution_of_annotation if provided, otherwise use voxel_size
+            if self.actual_resolution_of_annotation is not None:
+                # Create coordinate space with the actual resolution
+                dimensions = neuroglancer.CoordinateSpace(
+                    names=["z", "y", "x"],
+                    units="nm",
+                    scales=[
+                        self.actual_resolution_of_annotation[0],
+                        self.actual_resolution_of_annotation[1],
+                        self.actual_resolution_of_annotation[2],
+                    ],
+                )
+                state.dimensions = dimensions
+
+            # Add raw layer using dict-style assignment (will appear at end, but that's fine)
+            state.layers["raw"] = neuroglancer.ImageLayer(
+                source=raw_path_for_neuroglancer
+            )
+
+        # Set up coordinate space for output layers using voxel_size
+        output_dimensions = neuroglancer.CoordinateSpace(
+            names=["z", "y", "x"],
+            units="nm",
+            scales=[
+                self.voxel_size[0],
+                self.voxel_size[1],
+                self.voxel_size[2],
+            ],
+        )
+
         for name, zarr_path in zip(
             ["mask", "annotations_as_cylinders", "training_points"],
             [
@@ -845,38 +920,94 @@ class CylindricalAnnotations:
             ],
         ):
             zarr_path = (
-                zarr_path.replace("/nrs/cellmap", "nrs/")
+                zarr_path.replace("/nrs/cellmap/data", "nrs/data")
+                .replace("/nrs/cellmap", "nrs/")
                 .replace("/dm11/cellmap", "dm11/")
                 .replace("/prfs/cellmap", "prfs/")
             )
             if "s3://:" not in zarr_path:
                 zarr_path = "zarr://https://cellmap-vm1.int.janelia.org/" + zarr_path
 
-            state.layers[name] = neuroglancer.SegmentationLayer(
-                source=zarr_path + "/" + self.dataset
+            # Create layer with source using output dimensions
+            layer = neuroglancer.SegmentationLayer(
+                source=neuroglancer.LayerDataSource(
+                    url=zarr_path + "/" + self.dataset,
+                    transform=neuroglancer.CoordinateSpaceTransform(
+                        output_dimensions=output_dimensions
+                    ),
+                )
             )
+            state.layers[name] = layer
+            # Turn off mask layer visibility (must be done after adding to state)
+            if name == "mask":
+                if hasattr(state.layers[name], "visible"):
+                    state.layers[name].visible = False
+
         if len(self.removed_ids):
             print(f"{len(self.removed_ids)=}")
-            state.layers["removed_annotations"] = neuroglancer.AnnotationLayer(
+            removed_layer = neuroglancer.AnnotationLayer(
                 source=f"{self.output_annotations_directory}/removed_annotations".replace(
                     "/nrs/cellmap/",
                     "precomputed://https://cellmap-vm1.int.janelia.org/nrs/",
                 )
             )
+            state.layers["removed_annotations"] = removed_layer
+            # Make removed annotations visible
+            if hasattr(state.layers["removed_annotations"], "visible"):
+                state.layers["removed_annotations"].visible = True
+
             if len(self.removed_ids) != len(self.annotation_starts):
-                state.layers["kept_annotations"] = neuroglancer.AnnotationLayer(
+                kept_layer = neuroglancer.AnnotationLayer(
                     source=f"{self.output_annotations_directory}/kept_annotations".replace(
                         "/nrs/cellmap/",
                         "precomputed://https://cellmap-vm1.int.janelia.org/nrs/",
                     )
                 )
-        self.neuroglancer_url = neuroglancer.to_url(state)
-        # write urls to a file
-        with open(
-            f"{self.output_annotations_directory}/neuroglancer_url.txt", "w"
-        ) as f:
+                state.layers["kept_annotations"] = kept_layer
+                # Make kept annotations visible
+                if hasattr(state.layers["kept_annotations"], "visible"):
+                    state.layers["kept_annotations"].visible = True
+
+        # Calculate center of all annotations
+        import numpy as np
+
+        if len(self.annotation_centers) > 0:
+            # Get the mean center across all annotations
+            mean_center = np.mean(self.annotation_centers, axis=0)
+            # Set position to center of annotations (in physical coordinates)
+            state.position = mean_center.tolist()
+
+        # Enable ROI display in neuroglancer
+        state.show_slices = False  # Turn off slice views to show ROIs better
+
+        # Save state to JSON file
+        import os
+        import json
+
+        dataset_dir = f"{self.output_neuroglancer_link_directory}/{self.dataset}"
+        os.makedirs(dataset_dir, exist_ok=True)
+
+        state_file_path = f"{dataset_dir}/state.json"
+
+        # Convert state to JSON
+        state_json = state.to_json()
+
+        with open(state_file_path, "w") as f:
+            json.dump(state_json, f, indent=2)
+
+        # Create neuroglancer URL pointing to the state.json file
+        # Replace /nrs/cellmap/ with https://cellmap-vm1.int.janelia.org/nrs/
+        state_url = state_file_path.replace(
+            "/nrs/cellmap/", "https://cellmap-vm1.int.janelia.org/nrs/"
+        )
+
+        self.neuroglancer_url = f"https://neuroglancer-demo.appspot.com/#!{state_url}"
+
+        # Also write the URL to a text file for easy access
+        with open(f"{dataset_dir}/neuroglancer_url.txt", "w") as f:
             f.write(self.neuroglancer_url)
 
+        print(f"Neuroglancer state saved to: {state_file_path}")
         print(f"Neuroglancer url:\n{self.neuroglancer_url}")
 
     def standard_processing(self):
