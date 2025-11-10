@@ -93,6 +93,7 @@ class CylindricalAnnotations:
         raw_path=None,
         actual_resolution_of_annotation=None,
         debug=False,
+        num_training_points=None,
     ):
         np.random.seed(0)  # set seed for consistency of locations
         self.username = getpass.getuser()
@@ -160,7 +161,7 @@ class CylindricalAnnotations:
         # 36x36x36 is shape of region used to caluclate loss,so we need to make sure that the center is at least the diagonal away from the validation/test rois
         self.longest_box_diagonal = int(np.ceil(np.sqrt(3 * (36**2)))) + 1
         self.debug = debug  # if true, only use first 100 annotations
-
+        self.num_training_points = num_training_points
         # Lazy import neuroglancer only when needed
         import neuroglancer
 
@@ -515,6 +516,7 @@ class CylindricalAnnotations:
                     warnings.warn(f"empty id {id} {annotation_start} {annotation_end}")
                 # c = np.round(((annotation_start + annotation_end) * self.resolution / 2)).astype(int)
                 self.removed_ids.append(id)
+
         print(
             f"number of original centers: {len(self.annotation_starts)}, number of training centers: {len(self.training_points_by_object)}"
         )
@@ -684,6 +686,48 @@ class CylindricalAnnotations:
             if not found_valid_point:
                 self.removed_ids.append(id + 1)
 
+    def subsample_training_points(self):
+        num_objects = len(self.training_points_by_object)
+        # determine number of training points per object, round whichever way is closest to the desired number
+        number_training_points_per_object_ceiling = int(
+            np.ceil(self.num_training_points / num_objects)
+        )
+        number_of_training_points_floor = int(
+            np.floor(self.num_training_points / num_objects)
+        )
+        if abs(
+            number_training_points_per_object_ceiling * num_objects
+            - self.num_training_points
+        ) < abs(
+            number_of_training_points_floor * num_objects - self.num_training_points
+        ):
+            num_training_points_per_object = number_training_points_per_object_ceiling
+        else:
+            num_training_points_per_object = number_of_training_points_floor
+
+        print(
+            f"Sampling to {num_training_points_per_object*num_objects} of desired {self.num_training_points} training points: {num_training_points_per_object} training points per object"
+        )
+        subsampled_training_points_by_object = []
+
+        for points in self.training_points_by_object:
+            n = len(points)
+            with_replacement = n < num_training_points_per_object
+
+            if with_replacement:
+                # can request more than n; repeats are allowed
+                k = num_training_points_per_object
+                idx = np.random.choice(n, size=k, replace=True)
+            else:
+                # must not request more than n; no repeats
+                k = min(num_training_points_per_object, n)
+                idx = np.random.choice(n, size=k, replace=False)
+
+            chosen = [points[i] for i in idx]
+            subsampled_training_points_by_object.append(chosen)
+
+        self.training_points_by_object = subsampled_training_points_by_object
+
     def remove_validation_or_test_annotations_from_training(self, mode="all"):
         if mode == "deprecated_use_only_single_point":
             self.get_pseudorandom_training_centers()
@@ -693,6 +737,9 @@ class CylindricalAnnotations:
             self.get_all_training_points(random_shift_voxels=18)
         else:
             raise Exception(f"mode {mode} not recognized")
+
+        if self.num_training_points:
+            self.subsample_training_points()
 
     def write_out_annotations(self, output_directory, annotation_ids):
         annotation_type = "line"
