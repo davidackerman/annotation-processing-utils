@@ -1112,13 +1112,15 @@ class CylindricalAnnotations:
         batch_size=2,
         raw_min=None,
         raw_max=None,
-        raw_path=None,
+        num_lsd_voxels=None,
         lsds_to_affs_weight_ratio=0.5,
         validation_interval=5000,
         snapshot_interval=10000,
         iterations=500000,
         repetitions=3,
         start_config=None,
+        invert=False,
+        delete_existing=False,
     ):
         from ..utils.dacapo_util import DacapoRunBuilder
         from dacapo.experiments.starts import CosemStartConfig
@@ -1138,13 +1140,16 @@ class CylindricalAnnotations:
             batch_size=batch_size,
             raw_min=raw_min,
             raw_max=raw_max,
-            raw_path=raw_path,
+            invert=invert,
+            raw_path=self.raw_path,
+            num_lsd_voxels=num_lsd_voxels,
             lsds_to_affs_weight_ratio=lsds_to_affs_weight_ratio,
             validation_interval=validation_interval,
             snapshot_interval=snapshot_interval,
             iterations=iterations,
             repetitions=repetitions,
             start_config=start_config,
+            delete_existing=delete_existing,
         )
 
     @staticmethod
@@ -1157,7 +1162,10 @@ class CylindricalAnnotations:
         snapshot_interval=10000,
         iterations=500000,
         repetitions=3,
+        num_lsd_voxels=None,
         start_config=None,
+        delete_existing=False,
+        run_base_name=None,
     ):
         from ..utils.dacapo_util import DacapoRunBuilder
         from dacapo.experiments.starts import CosemStartConfig
@@ -1169,10 +1177,13 @@ class CylindricalAnnotations:
             datasplit_config=datasplit_config,
             base_lr=base_lr,
             batch_size=batch_size,
+            num_lsd_voxels=num_lsd_voxels,
             lsds_to_affs_weight_ratio=lsds_to_affs_weight_ratio,
             validation_interval=validation_interval,
             snapshot_interval=snapshot_interval,
             iterations=iterations,
             repetitions=repetitions,
             start_config=start_config,
+            delete_existing=delete_existing,
+            run_base_name=run_base_name,
         )
