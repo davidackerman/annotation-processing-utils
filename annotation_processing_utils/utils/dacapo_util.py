@@ -21,8 +21,9 @@ from dacapo.experiments import RunConfig
 from dacapo.experiments.starts import StartConfig
 from dacapo.store.create_store import create_config_store
 import getpass
-
+from funlib.persistence import open_ds
 from decimal import Decimal
+import numpy as np
 
 
 def scientific_to_plain_string(number):
@@ -50,17 +51,24 @@ class DacapoRunBuilder:
         datasplit_config=None,
         base_lr=2.5e-5,
         batch_size=2,
+        raw_min=None,
+        raw_max=None,
+        invert=False,
+        raw_path=None,
+        num_lsd_voxels=None,
         lsds_to_affs_weight_ratio=0.5,
         validation_interval=5000,
         snapshot_interval=10000,
         iterations=200000,
         repetitions=3,
         start_config=None,
+        delete_existing=False,
+        run_base_name=None,
     ):
         lr = base_lr * batch_size
         config_store = create_config_store()
-        self.create_task(lsds_to_affs_weight_ratio)
-
+        self.delete_existing = delete_existing
+        self.create_task(lsds_to_affs_weight_ratio, num_lsd_voxels=num_lsd_voxels)
         if datasplit_config:
             self.datasplit_config = datasplit_config
         else:
@@ -72,7 +80,11 @@ class DacapoRunBuilder:
                 training_points,
                 training_point_selection_mode,
                 validation_rois_dict,
-                config_store,
+                raw_min=raw_min,
+                raw_max=raw_max,
+                invert=invert,
+                raw_path=raw_path,
+                config_store=config_store,
             )
 
         self.architecture_config = self.create_architecture()
@@ -87,6 +99,7 @@ class DacapoRunBuilder:
             repetitions,
             start_config,
             config_store,
+            run_base_name=run_base_name,
         )
 
     def create_trainer(self, lr, batch_size=2, snapshot_interval=5000):
@@ -114,7 +127,7 @@ class DacapoRunBuilder:
             min_masked=0.05,
         )
 
-    def create_task(self, lsds_to_affs_weight_ratio):
+    def create_task(self, lsds_to_affs_weight_ratio, num_lsd_voxels=None):
         self.task_config = AffinitiesTaskConfig(
             name=f"3d_lsdaffs_weight_ratio_{lsds_to_affs_weight_ratio}",
             neighborhood=[
@@ -129,6 +142,9 @@ class DacapoRunBuilder:
                 (0, 0, 9),
             ],
             lsds=True,
+            num_lsd_voxels=(
+                10 if not num_lsd_voxels else num_lsd_voxels
+            ),  # 10 is default
             lsds_to_affs_weight_ratio=lsds_to_affs_weight_ratio,
         )
 
@@ -154,17 +170,36 @@ class DacapoRunBuilder:
         training_points,
         training_point_selection_mode,
         validation_rois_dict,
+        raw_min=None,
+        raw_max=None,
+        invert=False,
+        raw_path=None,
         config_store=None,
     ):
         # use pseudorandom centers
+        if raw_path:
+            # split before and after last .zarr, but first part should have .zarr
+            split_index = raw_path.rfind(".zarr") + len(".zarr")
+            raw_path_zarr = raw_path[:split_index]
+            raw_path_dataset = raw_path[split_index + 1 :]
+        else:
+            raw_path_zarr = f"/nrs/cellmap/data/{dataset}/{dataset}.zarr"
+            raw_path_dataset = "recon-1/em/fibsem-uint8/s0"
+
         raw_config = ZarrArrayConfig(
             name="raw",
-            file_name=Path(f"/nrs/cellmap/data/{dataset}/{dataset}.zarr"),
-            dataset="recon-1/em/fibsem-uint8/s0",
+            file_name=Path(raw_path_zarr),
+            dataset=raw_path_dataset,
         )
+        ds_dtype = open_ds(raw_path_zarr, raw_path_dataset).dtype
+        dtype_info = np.iinfo(ds_dtype)
         # We get an error without this, and will suggests having it as such https://cell-map.slack.com/archives/D02KBQ990ER/p1683762491204909
         raw_config = IntensitiesArrayConfig(
-            name="raw", source_array_config=raw_config, min=0, max=255
+            name="raw",
+            source_array_config=raw_config,
+            min=float(dtype_info.min) if not raw_min else float(raw_min),
+            max=float(dtype_info.max) if not raw_max else float(raw_max),
+            invert=invert,
         )
 
         gt_config = ZarrArrayConfig(
@@ -208,6 +243,29 @@ class DacapoRunBuilder:
         )
 
         # store it so that can combine later
+        if self.delete_existing:
+            try:
+                existing = config_store.retrieve_datasplit_config(
+                    self.datasplit_config.name
+                )
+                print(
+                    "Found existing datasplit config {}, deleting...".format(
+                        self.datasplit_config.name
+                    )
+                )
+            # except if this is there ValueError: No config with name:
+            except ValueError as e:
+                msg = str(e)
+                if msg.startswith("No config with name"):
+                    existing = None
+                else:
+                    raise e
+
+            if existing:
+                config_store.delete_config(
+                    config_store.datasplits, self.datasplit_config.name
+                )
+
         if config_store:
             config_store.store_datasplit_config(self.datasplit_config)
 
@@ -222,12 +280,15 @@ class DacapoRunBuilder:
         repetitions=3,
         start_config=None,
         config_store=None,
+        run_base_name=None,
     ):
         # make validation interval huge so don't have to deal with validation until after the fact
         validation_interval = validation_interval
         for i in range(repetitions):
-            run_config = RunConfig(
-                name=("_").join(
+            run_base_name = (
+                run_base_name
+                if run_base_name
+                else ("_").join(
                     [
                         "scratch" if start_config is None else "finetuned",
                         task_config.name,
@@ -236,7 +297,9 @@ class DacapoRunBuilder:
                         trainer_config.name,
                     ]
                 )
-                + f"__{i}",
+            )
+            run_config = RunConfig(
+                name=run_base_name + f"__{i}",
                 task_config=task_config,
                 datasplit_config=datasplit_config,
                 architecture_config=architecture_config,
@@ -246,6 +309,24 @@ class DacapoRunBuilder:
                 repetition=i,
                 start_config=start_config,
             )
+
+            if self.delete_existing:
+                try:
+                    existing = config_store.retrieve_run_config(run_config.name)
+                    print(
+                        "Found existing run config {}, deleting...".format(
+                            run_config.name
+                        )
+                    )
+                except ValueError as e:
+                    msg = str(e)
+                    if msg.startswith("No config with name"):
+                        existing = None
+                    else:
+                        raise e
+
+                if existing:
+                    config_store.delete_config(config_store.runs, run_config.name)
 
             if config_store:
                 config_store.store_run_config(run_config)
