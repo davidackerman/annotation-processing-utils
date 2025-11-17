@@ -50,7 +50,7 @@ def get_arguments_per_submission(submision_yaml_path, submission_type):
                 bsub_formatter(
                     {
                         "--run": run,
-                        "bsub_args": "bsub -P cellmap -q gpu_short -n 12 -gpu num=1",
+                        "bsub_args": "bsub -P cellmap -q gpu_h100 -n 12 -gpu num=1",
                         "log_path": log_path,
                     },
                     submission_type,
@@ -407,6 +407,12 @@ def get_failed_jobs_from_array_dir(job_array_dir):
 def generic_submitter(submission_type):
     parser = argparse.ArgumentParser(description=f"Submit {submission_type}")
     parser.add_argument(
+        "--no-job-array",
+        action="store_true",
+        help="Disable job array submission (default: submit as job array)",
+        default=False,
+    )
+    parser.add_argument(
         "submission_info_path", type=str, help="Path to the submission info yaml"
     )
     parser.add_argument(
@@ -477,14 +483,23 @@ def generic_submitter(submission_type):
         print(f"No jobs to submit for {submission_type}")
         return
 
-    # Create job array submission with auto-resubmit if requested
-    submit_job_array_with_retries(
-        arguments_per_submission,
-        submission_type,
-        args.submission_info_path,
-        auto_resubmit=args.auto_resubmit,
-        max_retries=args.max_retries,
-    )
+    if not args.no_job_array:
+        # Submit jobs individually
+        for cmd in arguments_per_submission:
+            print(f"Submitting job: {cmd}")
+            result = subprocess.run(cmd, shell=True)
+            if result.returncode != 0:
+                print(f"Error submitting job: {cmd}")
+            time.sleep(1)  # brief pause between submissions
+    else:
+        # Create job array submission with auto-resubmit if requested
+        submit_job_array_with_retries(
+            arguments_per_submission,
+            submission_type,
+            args.submission_info_path,
+            auto_resubmit=args.auto_resubmit,
+            max_retries=args.max_retries,
+        )
 
 
 def submit_inference():
