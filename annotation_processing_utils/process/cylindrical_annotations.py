@@ -91,7 +91,6 @@ class CylindricalAnnotations:
         dataset="jrc_22ak351-leaf-3m",
         training_point_selection_mode="all",
         raw_path=None,
-        actual_resolution_of_annotation=None,
         debug=False,
         num_training_points=None,
     ):
@@ -124,14 +123,8 @@ class CylindricalAnnotations:
                 raw_dataset_name = "/volumes/raw/s0"
             elif "recon-1":
                 raw_dataset_name = "/recon-1/em/fibsem-uint8/s0"
-        self.actual_resolution_of_annotation = actual_resolution_of_annotation
         self.raw_dataset = open_ds(raw_zarr, raw_dataset_name)
         self.voxel_size = self.raw_dataset.voxel_size
-        self.resolution_ratio = (
-            np.array([1, 1, 1])
-            if self.actual_resolution_of_annotation is None
-            else np.array(self.voxel_size) / self.actual_resolution_of_annotation
-        )
 
         self.output_mask_zarr = output_mask_zarr
         self.output_gt_zarr = output_gt_zarr
@@ -143,9 +136,13 @@ class CylindricalAnnotations:
         self.empty_annotations = []
         self.radius = radius
 
+        # Create roi_calculator which reads coordinate_scaling from YAML
         self.roi_calculator = TrainingValidationTestRoiCalculator(
-            training_validation_test_roi_info_yaml, self.resolution_ratio
+            training_validation_test_roi_info_yaml
         )
+
+        # Get coordinate_scaling from roi_calculator
+        self.coordinate_scaling = self.roi_calculator.coordinate_scaling
         if self.roi_calculator.resolution / self.raw_dataset.voxel_size[0] == 2:
             raw_dataset_name = raw_dataset_name.replace("/s0", "/s1")
             self.raw_dataset = open_ds(raw_zarr, raw_dataset_name)
@@ -231,8 +228,8 @@ class CylindricalAnnotations:
             / self.voxel_size[0]
         )
 
-        self.annotation_starts = self.annotation_starts * self.resolution_ratio
-        self.annotation_ends = self.annotation_ends * self.resolution_ratio
+        self.annotation_starts = self.annotation_starts * self.coordinate_scaling
+        self.annotation_ends = self.annotation_ends * self.coordinate_scaling
         self.annotation_centers = (self.annotation_starts + self.annotation_ends) / 2
 
     def get_negative_examples(filename="annotations_20230620_221638.csv"):
@@ -928,16 +925,20 @@ class CylindricalAnnotations:
                         + raw_path_for_neuroglancer
                     )
 
-            # Use actual_resolution_of_annotation if provided, otherwise use voxel_size
-            if self.actual_resolution_of_annotation is not None:
+            # Use coordinate_scaling to calculate actual resolution if provided
+            if not np.array_equal(self.coordinate_scaling, np.array([1, 1, 1])):
+                # Calculate actual_resolution from coordinate_scaling
+                # coordinate_scaling = voxel_size / actual_resolution
+                # so actual_resolution = voxel_size / coordinate_scaling
+                actual_resolution = np.array(self.voxel_size) / self.coordinate_scaling
                 # Create coordinate space with the actual resolution
                 dimensions = neuroglancer.CoordinateSpace(
                     names=["z", "y", "x"],
                     units="nm",
                     scales=[
-                        self.actual_resolution_of_annotation[0],
-                        self.actual_resolution_of_annotation[1],
-                        self.actual_resolution_of_annotation[2],
+                        actual_resolution[0],
+                        actual_resolution[1],
+                        actual_resolution[2],
                     ],
                 )
                 state.dimensions = dimensions

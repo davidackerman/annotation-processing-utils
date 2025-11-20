@@ -74,12 +74,10 @@ class TrainingValidationTestRoiCalculator:
     def __init__(
         self,
         training_validation_test_roi_info_yaml,
-        scale_coordinates=np.array([1, 1, 1]),
     ):
         self.training_validation_test_roi_info_yaml = (
             training_validation_test_roi_info_yaml
         )
-        self.scale_coordinates = scale_coordinates
 
         self.rois_dict = {"training": {}, "validation": {}, "test": {}}
         self.__extract_training_validation_test_info(
@@ -105,6 +103,13 @@ class TrainingValidationTestRoiCalculator:
         self.keep_all_valid_training_points = info.get(
             "keep_all_valid_training_points", False
         )
+
+        # Read coordinate_scaling from YAML, default to [1, 1, 1] if not present
+        if "coordinate_scaling" in info:
+            coord_scaling = info["coordinate_scaling"]
+            self.coordinate_scaling = np.array([coord_scaling["z"], coord_scaling["y"], coord_scaling["x"]])
+        else:
+            self.coordinate_scaling = np.array([1, 1, 1])
 
         # annotations
         for split_method, split_method_values in info["annotations"].items():
@@ -158,8 +163,8 @@ class TrainingValidationTestRoiCalculator:
 
                     for idx, dim in enumerate(["z", "y", "x"]):
                         dim_start, dim_end = roi_info[dim].split("-")
-                        roi_start[idx] = int(dim_start) * self.scale_coordinates[idx]
-                        roi_end[idx] = int(dim_end) * self.scale_coordinates[idx]
+                        roi_start[idx] = int(dim_start) * self.coordinate_scaling[idx]
+                        roi_end[idx] = int(dim_end) * self.coordinate_scaling[idx]
                     roi_to_split_in_voxels = RoiToSplitInVoxels(
                         roi_start,
                         roi_end,
@@ -218,8 +223,8 @@ class TrainingValidationTestRoiCalculator:
             np.array([df["end z (nm)"], df["end y (nm)"], df["end x (nm)"]]).T
             / self.resolution
         )
-        starts = self.scale_coordinates * starts
-        ends = self.scale_coordinates * ends
+        starts = self.coordinate_scaling * starts
+        ends = self.coordinate_scaling * ends
         centers = (starts + ends) / 2
 
         return starts, ends, centers
@@ -559,6 +564,7 @@ class TrainingValidationTestRoiCalculator:
 
         viewer = neuroglancer.Viewer()
         with viewer.txn() as s:
+            transform = None
             is_first = True
             for split_method, split_method_values in roi_info["annotations"].items():
                 csvs = []
@@ -570,23 +576,24 @@ class TrainingValidationTestRoiCalculator:
                     csvs = split_method_values
                 for csv in csvs:
                     is_first = False
-                    df = pd.read_csv(csv)
-                    df = drop_close_duplicates_allclose(
-                        df,
-                        [
-                            "start z (nm)",
-                            "start y (nm)",
-                            "start x (nm)",
-                            "end z (nm)",
-                            "end y (nm)",
-                            "end x (nm)",
-                        ],
-                    )
+                    neuroglancer_url = pd.read_csv(csv)["neuroglancer url"][0]
+                    state = parse_url(neuroglancer_url)
                     layer_name = (
                         split_method + "_" + os.path.basename(csv).split(".csv")[0]
                     )
-                    neuroglancer_url = df["neuroglancer url"][0]
-                    state = parse_url(neuroglancer_url)
+                    transform = neuroglancer.CoordinateSpaceTransform(
+                        input_dimensions=neuroglancer.CoordinateSpace(
+                            names=["x", "y", "z"],
+                            units=["m", "m", "m"],
+                            scales=np.array([1e-9, 1e-9, 1e-9])
+                            * self.coordinate_scaling,  # annotation resolution
+                        ),
+                        output_dimensions=neuroglancer.CoordinateSpace(
+                            names=["x", "y", "z"],
+                            units=["m", "m", "m"],
+                            scales=[1e-9, 1e-9, 1e-9],  # desired output voxel size
+                        ),
+                    )
                     for layer in state.layers:
                         if (
                             layer.name == "fibsem-uint8"
@@ -597,17 +604,46 @@ class TrainingValidationTestRoiCalculator:
                             layer.name = "raw"
                             s.layers["raw"] = layer
                         if layer.name == "saved_annotations":
-                            layer.name = layer_name
-                            s.layers[layer_name] = layer
+                            # layer.source is a LayerDataSources (list-like container)
+                            # Get the URL from the first source
+                            first_source = layer.source[0]
+                            if hasattr(first_source, "url"):
+                                annotation_source_url = first_source.url
+                            else:
+                                # If it's already a string, use it directly
+                                annotation_source_url = str(first_source)
 
-            s.layers["rois"] = neuroglancer.AnnotationLayer(
-                source=self.rois_as_annotations,
-                shader="""
-                void main() {
-                    setColor(prop_box_color());
-                }
-                """,
-            )
+                            # Create a new AnnotationLayer with a LayerDataSource that includes the transform
+                            # Pass URL as first positional argument, transform as keyword argument
+                            s.layers[layer_name] = neuroglancer.AnnotationLayer(
+                                source=neuroglancer.LayerDataSource(
+                                    annotation_source_url,
+                                    transform=transform,
+                                )
+                            )
+
+            # Create rois layer with transform if available
+            if transform is not None:
+                s.layers["rois"] = neuroglancer.AnnotationLayer(
+                    source=neuroglancer.LayerDataSource(
+                        self.rois_as_annotations,
+                        transform=transform,
+                    ),
+                    shader="""
+                    void main() {
+                        setColor(prop_box_color());
+                    }
+                    """,
+                )
+            else:
+                s.layers["rois"] = neuroglancer.AnnotationLayer(
+                    source=self.rois_as_annotations,
+                    shader="""
+                    void main() {
+                        setColor(prop_box_color());
+                    }
+                    """,
+                )
         self.neuroglancer_url = neuroglancer.to_url(viewer.state)
         print(f"Neuroglancer view:\n{self.neuroglancer_url}")
 
