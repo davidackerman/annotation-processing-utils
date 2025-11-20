@@ -53,15 +53,20 @@ def run_inference():
     )
     parser.add_argument(
         "--raw_min",
-        type=str,
+        type=float,
         help="The minimum value for the raw data",
         required=True,
     )
     parser.add_argument(
         "--raw_max",
-        type=str,
+        type=float,
         help="The maximum value for the raw data",
         required=True,
+    )
+    parser.add_argument(
+        "--invert",
+        action="store_true",
+        help="Invert the raw data",
     )
     parser.add_argument(
         "--roi_offset",
@@ -88,6 +93,7 @@ def run_inference():
         args.raw_path,
         args.raw_min,
         args.raw_max,
+        args.invert,
         args.inference_path,
         roi,
     )

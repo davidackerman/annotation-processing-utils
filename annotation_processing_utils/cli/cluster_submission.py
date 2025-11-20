@@ -3,6 +3,7 @@ from pathlib import Path
 import yaml
 import os
 import subprocess
+import numpy as np
 
 import json
 import shlex
@@ -72,15 +73,20 @@ def get_arguments_per_submission(submision_yaml_path, submission_type):
         analysis_info_name = current_analysis_info["name"]
         raw_path = current_analysis_info["raw_path"]
         gt_path = current_analysis_info["gt_path"]
-        raw_min = current_analysis_info.get("raw_min")
-        raw_max = current_analysis_info.get("raw_max")
+        raw_min = current_analysis_info.get("raw_min", 0)
+        raw_max = current_analysis_info.get("raw_max", 255)
+        invert = current_analysis_info.get("invert", False)
         mask_path = current_analysis_info.get("mask_path", None)
+        scale_coordinates = current_analysis_info.get(
+            "scale_coordinates", np.array([1, 1, 1])
+        )
         inference_base_path = Path(current_analysis_info["inference_base_path"])
         metrics_base_path = Path(current_analysis_info["metrics_base_path"])
 
         # get rois for this dataset
         roi_splitter = TrainingValidationTestRoiCalculator(
-            current_analysis_info["training_validation_test_roi_yaml"]
+            current_analysis_info["training_validation_test_roi_yaml"],
+            scale_coordinates=scale_coordinates,
         )
         roi_splitter.get_training_validation_test_rois()
         rois_dict = roi_splitter.rois_dict
@@ -111,20 +117,25 @@ def get_arguments_per_submission(submision_yaml_path, submission_type):
                             if submission_type == "inference":
                                 roi_offset = ",".join(str(o) for o in roi.offset)
                                 roi_shape = ",".join(str(s) for s in roi.shape)
+                                args = {
+                                    "--run": run,
+                                    "--raw_path": raw_path,
+                                    "--inference_path": affinities_path,
+                                    "--iteration": iteration,
+                                    "--roi_offset": roi_offset,
+                                    "--roi_shape": roi_shape,
+                                    "--raw_min": raw_min,
+                                    "--raw_max": raw_max,
+                                    "bsub_args": f"bsub -P cellmap -q gpu_short -n 4 -gpu num=1 -J inference-{run}-{roi_name}-iter{iteration}",
+                                    "log_path": log_path,
+                                }
+
+                                if invert:
+                                    args["--invert"] = invert
+
                                 arguments_per_submission.append(
                                     bsub_formatter(
-                                        {
-                                            "--run": run,
-                                            "--raw_path": raw_path,
-                                            "--inference_path": affinities_path,
-                                            "--iteration": iteration,
-                                            "--roi_offset": roi_offset,
-                                            "--roi_shape": roi_shape,
-                                            "--raw_min": raw_min,
-                                            "--raw_max": raw_max,
-                                            "bsub_args": "bsub -P cellmap -q gpu_short -n 4 -gpu num=1",
-                                            "log_path": log_path,
-                                        },
+                                        args,
                                         submission_type,
                                     )
                                 )
@@ -213,7 +224,7 @@ def get_arguments_per_submission(submision_yaml_path, submission_type):
                                         "--test_path": test_path,
                                         "--metrics_path": metrics_path,
                                         "--num_workers": 10,
-                                        "bsub_args": "bsub -P cellmap -n 10",
+                                        "bsub_args": f"bsub -P cellmap -n 10 -J metrics-{run}-{roi_name}-iter{iteration}",
                                         "log_path": current_log_path,
                                     }
 
@@ -483,7 +494,7 @@ def generic_submitter(submission_type):
         print(f"No jobs to submit for {submission_type}")
         return
 
-    if not args.no_job_array:
+    if args.no_job_array:
         # Submit jobs individually
         for cmd in arguments_per_submission:
             print(f"Submitting job: {cmd}")
@@ -636,12 +647,18 @@ def submit_job_array(arguments_per_submission, submission_type, submission_info_
     bsub_options = []
     parts = bsub_parts.split()
     i = 1  # Skip 'bsub'
+
     while i < len(parts):
         if parts[i].startswith("-"):
-            if parts[i] in ["-o", "-e"]:  # Skip original log options
+            if parts[i] in ["-o", "-e", "-J"]:  # Skip original options
                 i += 2
                 continue
-            elif parts[i] in ["-P", "-q", "-n", "-gpu", "-J"]:
+            elif parts[i] in [
+                "-P",
+                "-q",
+                "-n",
+                "-gpu",
+            ]:
                 if i + 1 < len(parts):
                     bsub_options.extend([parts[i], parts[i + 1]])
                     i += 2
@@ -658,7 +675,7 @@ def submit_job_array(arguments_per_submission, submission_type, submission_info_
 
     script_content = f"""#!/bin/bash
 #BSUB -J {submission_type}_array[1-{num_jobs}]
-{bsub_opts_str}
+#BSUB {bsub_opts_str}
 #BSUB -o {job_array_dir}/job_%I.o
 #BSUB -e {job_array_dir}/job_%I.e
 

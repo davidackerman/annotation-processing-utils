@@ -45,6 +45,7 @@ def inference(
     raw_path: str,
     raw_min: float,
     raw_max: float,
+    invert: bool,
     inference_path: str,
     roi: Roi,
 ):
@@ -89,7 +90,7 @@ def inference(
     )
     # We get an error without this, and will suggests having it as such https://cell-map.slack.com/archives/D02KBQ990ER/p1683762491204909
     raw_intensities_array_config = IntensitiesArrayConfig(
-        name="raw", source_array_config=raw_zarr_array_config, min=raw_min, max=raw_max
+        name="raw", source_array_config=raw_zarr_array_config, min=raw_min, max=raw_max, invert=invert
     )
     raw_array = IntensitiesArray(raw_intensities_array_config)
 
