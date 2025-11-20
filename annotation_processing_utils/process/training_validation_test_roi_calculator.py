@@ -17,6 +17,32 @@ import yaml
 import warnings
 
 
+def drop_close_duplicates_allclose(df, coord_cols, rtol=1e-5, atol=1e-8):
+    """
+    Keep the first occurrence of each point and drop later rows whose
+    coordinates are allclose (per-element) to any kept row.
+    """
+    coords = df[coord_cols].to_numpy(dtype=float)
+    n = len(df)
+    keep = np.ones(n, dtype=bool)
+
+    for i in range(n):
+        if not keep[i]:
+            continue
+
+        # Compare row i with all later rows using allclose-style logic
+        diffs = coords[i + 1 :]
+        # is_close_to_i[j] == True if coords[i+1+j] is allclose to coords[i]
+        is_close_to_i = np.all(
+            np.isclose(diffs, coords[i], rtol=rtol, atol=atol),
+            axis=1,
+        )
+
+        keep[i + 1 :][is_close_to_i] = False
+
+    return df[keep].copy()
+
+
 class RoiToSplitInVoxels:
     def __init__(
         self,
@@ -26,6 +52,7 @@ class RoiToSplitInVoxels:
         split_dimension=None,
         keep_if_empty=False,
         type_if_do_not_split="validation",
+        shrink_to_fit_annotations=False,
     ):
         dims = ["z", "y", "x"]
         roi = Roi(roi_start, roi_end - roi_start)
@@ -37,6 +64,7 @@ class RoiToSplitInVoxels:
             dims.index(split_dimension) if split_dimension in dims else split_dimension
         )
         self.keep_if_empty = keep_if_empty
+        self.shrink_to_fit_annotations = shrink_to_fit_annotations
         if self.split_dimension == "do_not_split":
             self.type_if_do_not_split = type_if_do_not_split
 
@@ -50,10 +78,12 @@ class TrainingValidationTestRoiCalculator:
         self.training_validation_test_roi_info_yaml = (
             training_validation_test_roi_info_yaml
         )
+
         self.rois_dict = {"training": {}, "validation": {}, "test": {}}
         self.__extract_training_validation_test_info(
             training_validation_test_roi_info_yaml
         )
+
         neuroglancer.set_server_bind_address("0.0.0.0")
 
     def __extract_training_validation_test_info(
@@ -70,19 +100,34 @@ class TrainingValidationTestRoiCalculator:
             info = yaml.safe_load(stream)
 
         self.resolution = info["resolution"]
+        self.keep_all_valid_training_points = info.get(
+            "keep_all_valid_training_points", False
+        )
+
+        # Read coordinate_scaling from YAML, default to [1, 1, 1] if not present
+        if "coordinate_scaling" in info:
+            coord_scaling = info["coordinate_scaling"]
+            self.coordinate_scaling = np.array([coord_scaling["z"], coord_scaling["y"], coord_scaling["x"]])
+        else:
+            self.coordinate_scaling = np.array([1, 1, 1])
 
         # annotations
         for split_method, split_method_values in info["annotations"].items():
             if split_method == "split_by_rois":
                 self.annotation_csvs.extend(split_method_values)
             elif split_method == "split_automatically":
-                for roi_type, roi_infos in split_method_values.items():
-                    for roi_info in roi_infos:
+                for split_type, split_type_values in split_method_values.items():
+                    for roi_info in split_type_values:
                         roi_name = roi_info["roi_name"]
+                        shrink_to_fit_annotations = roi_info.get(
+                            "shrink_to_fit_annotations", False
+                        )
                         annotation_csv = roi_info["annotation_csv"]
                         self.annotation_csvs.append(annotation_csv)
-                        self.rois_to_split_in_voxels[roi_type][roi_name] = (
-                            self.__get_roi_to_split_from_annotation_csv(annotation_csv)
+                        self.rois_to_split_in_voxels[split_type][roi_name] = (
+                            self.__get_roi_to_split_from_annotation_csv(
+                                annotation_csv, shrink_to_fit_annotations
+                            )
                         )
         self.__get_all_annotation_centers_voxels()
 
@@ -110,11 +155,16 @@ class TrainingValidationTestRoiCalculator:
                         if "type_if_do_not_split" in roi_info
                         else "validation"
                     )
+                    shrink_to_fit_annotations = (
+                        roi_info["shrink_to_fit_annotations"]
+                        if "shrink_to_fit_annotations" in roi_info
+                        else False
+                    )
 
                     for idx, dim in enumerate(["z", "y", "x"]):
                         dim_start, dim_end = roi_info[dim].split("-")
-                        roi_start[idx] = int(dim_start)
-                        roi_end[idx] = int(dim_end)
+                        roi_start[idx] = int(dim_start) * self.coordinate_scaling[idx]
+                        roi_end[idx] = int(dim_end) * self.coordinate_scaling[idx]
                     roi_to_split_in_voxels = RoiToSplitInVoxels(
                         roi_start,
                         roi_end,
@@ -122,6 +172,7 @@ class TrainingValidationTestRoiCalculator:
                         split_dimension,
                         keep_if_empty,
                         type_if_do_not_split,
+                        shrink_to_fit_annotations=shrink_to_fit_annotations,
                     )
                     if self.__roi_is_not_empty(roi_to_split_in_voxels.roi):
                         self.rois_to_split_in_voxels[roi_type][
@@ -145,6 +196,18 @@ class TrainingValidationTestRoiCalculator:
         for annotation_csv in self.annotation_csvs:
             dfs.append(pd.read_csv(annotation_csv))
         df = pd.concat(dfs)
+        df = drop_close_duplicates_allclose(
+            df,
+            [
+                "start z (nm)",
+                "start y (nm)",
+                "start x (nm)",
+                "end z (nm)",
+                "end y (nm)",
+                "end x (nm)",
+            ],
+        )
+
         (
             self.all_annotation_starts_voxels,
             self.all_annotation_ends_voxels,
@@ -160,6 +223,8 @@ class TrainingValidationTestRoiCalculator:
             np.array([df["end z (nm)"], df["end y (nm)"], df["end x (nm)"]]).T
             / self.resolution
         )
+        starts = self.coordinate_scaling * starts
+        ends = self.coordinate_scaling * ends
         centers = (starts + ends) / 2
 
         return starts, ends, centers
@@ -171,8 +236,21 @@ class TrainingValidationTestRoiCalculator:
         )
         return np.sum(valid_annotations) > 0
 
-    def __get_roi_to_split_from_annotation_csv(self, annotation_csv):
+    def __get_roi_to_split_from_annotation_csv(
+        self, annotation_csv, shrink_to_fit_annotations=False
+    ):
         df = pd.read_csv(annotation_csv)
+        df = drop_close_duplicates_allclose(
+            df,
+            [
+                "start z (nm)",
+                "start y (nm)",
+                "start x (nm)",
+                "end z (nm)",
+                "end y (nm)",
+                "end x (nm)",
+            ],
+        )
         (
             annotation_starts,
             annotation_ends,
@@ -182,18 +260,23 @@ class TrainingValidationTestRoiCalculator:
         annotation_endpoints = np.concatenate((annotation_starts, annotation_ends))
         roi_start = np.ceil(np.min(annotation_endpoints, axis=0)).astype(int)
         roi_end = np.floor(np.max(annotation_endpoints, axis=0)).astype(int)
-        return RoiToSplitInVoxels(roi_start, roi_end, resolution=1)
+        return RoiToSplitInVoxels(
+            roi_start,
+            roi_end,
+            resolution=1,
+            shrink_to_fit_annotations=shrink_to_fit_annotations,
+        )
 
     def __get_valid_annotations(self, roi: Roi, annotation_centers):
         # check annotations are within region
 
         valid_annotations = (
             (annotation_centers[:, 0] >= roi.begin[0])
-            & (annotation_centers[:, 0] <= roi.end[0])
+            & (annotation_centers[:, 0] < roi.end[0])  # Changed from <=
             & (annotation_centers[:, 1] >= roi.begin[1])
-            & (annotation_centers[:, 1] <= roi.end[1])
+            & (annotation_centers[:, 1] < roi.end[1])  # Changed from <=
             & (annotation_centers[:, 2] >= roi.begin[2])
-            & (annotation_centers[:, 2] <= roi.end[2])
+            & (annotation_centers[:, 2] < roi.end[2])  # Changed from <=
         )
         return valid_annotations
 
@@ -209,7 +292,8 @@ class TrainingValidationTestRoiCalculator:
         valid_starts = annotation_starts[valid_annotations]
         valid_ends = annotation_ends[valid_annotations]
         valid_endpoints = np.concatenate((valid_starts, valid_ends))
-
+        if len(valid_endpoints) == 0:
+            return roi  # nothing to fit to
         roi_start = np.maximum(
             np.array(roi.begin),
             np.floor(np.min(valid_endpoints, axis=0)).astype(int),
@@ -231,6 +315,7 @@ class TrainingValidationTestRoiCalculator:
         annotation_ends,
         split_dimension,
         desired_ratio=0.5,
+        shrink_to_fit_annotations=False,
     ):
         first_roi_end = np.array(roi.end)
         second_roi_start = np.array(roi.begin)
@@ -258,21 +343,23 @@ class TrainingValidationTestRoiCalculator:
                     num_kept_annotations = (
                         annotations_in_first_half + annotations_in_second_half
                     )
+
         first_roi = self.__roi_from_bounding_box(roi.begin, first_roi_end)
         second_roi = self.__roi_from_bounding_box(second_roi_start, roi.end)
 
-        # first_roi = self.__get_minimal_bounding_roi(
-        #     self.__roi_from_bounding_box(roi.begin, first_roi_end),
-        #     annotation_starts,
-        #     annotation_centers,
-        #     annotation_ends,
-        # )
-        # second_roi = self.__get_minimal_bounding_roi(
-        #     self.__roi_from_bounding_box(second_roi_start, roi.end),
-        #     annotation_starts,
-        #     annotation_centers,
-        #     annotation_ends,
-        # )
+        if shrink_to_fit_annotations:
+            first_roi = self.__get_minimal_bounding_roi(
+                self.__roi_from_bounding_box(roi.begin, first_roi_end),
+                annotation_starts,
+                annotation_centers,
+                annotation_ends,
+            )
+            second_roi = self.__get_minimal_bounding_roi(
+                self.__roi_from_bounding_box(second_roi_start, roi.end),
+                annotation_starts,
+                annotation_centers,
+                annotation_ends,
+            )
         return (num_kept_annotations, first_roi, second_roi)
 
     def split_validation_test_roi(
@@ -284,6 +371,7 @@ class TrainingValidationTestRoiCalculator:
         split_dimension=None,
         validation_test_split_ratio=1,
         max_num_kept_annotations=0,
+        shrink_to_fit_annotations=False,
     ):
         if split_dimension is not None:
             split_dimensions_to_check = [split_dimension]
@@ -305,6 +393,7 @@ class TrainingValidationTestRoiCalculator:
                 annotation_ends,
                 split_dimension=current_split_dimension,
                 desired_ratio=validation_test_split_ratio,
+                shrink_to_fit_annotations=shrink_to_fit_annotations,
             )
 
             if num_kept_annotations > max_num_kept_annotations:
@@ -322,6 +411,7 @@ class TrainingValidationTestRoiCalculator:
         annotation_ends,
         training_split_ratio=0.75 / 0.25,
         validation_test_split_ratio=1,
+        shrink_to_fit_annotations=False,
     ):
         max_num_kept_annotations = 0
         # do it in x,y,z order [2,1,0] to be consistent with previous iteration of this code
@@ -333,6 +423,7 @@ class TrainingValidationTestRoiCalculator:
                 annotation_ends,
                 first_split_dimension,
                 desired_ratio=training_split_ratio,
+                shrink_to_fit_annotations=shrink_to_fit_annotations,
             )
 
             (
@@ -346,6 +437,7 @@ class TrainingValidationTestRoiCalculator:
                 annotation_ends,
                 validation_test_split_ratio=validation_test_split_ratio,
                 max_num_kept_annotations=max_num_kept_annotations,
+                shrink_to_fit_annotations=shrink_to_fit_annotations,
             )
 
             if num_kept_annotations > max_num_kept_annotations:
@@ -375,6 +467,7 @@ class TrainingValidationTestRoiCalculator:
                 self.all_annotation_ends_voxels,
                 training_split_ratio,
                 validation_test_split_ratio,
+                shrink_to_fit_annotations=roi_to_split.shrink_to_fit_annotations,
             )
             self.rois_dict["training"][roi_to_split_name] = (
                 best_training_roi * self.resolution
@@ -389,6 +482,13 @@ class TrainingValidationTestRoiCalculator:
         ].items():
             if roi_to_split.split_dimension == "do_not_split":
                 # then it was deemed too small to split so we just use it as validation if type_if_do_not_split hasn't been specified
+                if roi_to_split.shrink_to_fit_annotations:
+                    roi_to_split.roi = self.__get_minimal_bounding_roi(
+                        roi_to_split.roi,
+                        self.all_annotation_starts_voxels,
+                        self.all_annotation_centers_voxels,
+                        self.all_annotation_ends_voxels,
+                    )
                 self.rois_dict[roi_to_split.type_if_do_not_split][roi_to_split_name] = (
                     roi_to_split.roi * self.resolution
                 )
@@ -400,6 +500,7 @@ class TrainingValidationTestRoiCalculator:
                     self.all_annotation_ends_voxels,
                     split_dimension=roi_to_split.split_dimension,
                     validation_test_split_ratio=validation_test_split_ratio,
+                    shrink_to_fit_annotations=roi_to_split.shrink_to_fit_annotations,
                 )
                 self.rois_dict["test"][roi_to_split_name] = (
                     best_test_roi * self.resolution
@@ -428,6 +529,7 @@ class TrainingValidationTestRoiCalculator:
             "validation": (0, 0, 255),
             "test": (255, 0, 0),
         }
+
         for id, (roi_name, roi_color) in enumerate(roi_name_to_color_dict.items()):
             rois = self.rois_dict[roi_name]
             for roi in rois.values():
@@ -438,7 +540,6 @@ class TrainingValidationTestRoiCalculator:
                     box_color=roi_color,
                 )
                 annotation_writer.write(f"{output_directory}")
-
         precomputed_path = output_directory
         precomputed_path = precomputed_path.replace(
             "/nrs/cellmap", "precomputed://https://cellmap-vm1.int.janelia.org/nrs/"
@@ -463,36 +564,86 @@ class TrainingValidationTestRoiCalculator:
 
         viewer = neuroglancer.Viewer()
         with viewer.txn() as s:
+            transform = None
             is_first = True
-            for split_type, csvs in roi_info["annotations"].items():
+            for split_method, split_method_values in roi_info["annotations"].items():
+                csvs = []
+                if split_method == "split_automatically":
+                    for split_type, split_type_values in split_method_values.items():
+                        for roi_info in split_type_values:
+                            csvs.append(roi_info["annotation_csv"])
+                else:
+                    csvs = split_method_values
                 for csv in csvs:
                     is_first = False
-                    df = pd.read_csv(csv)
-                    layer_name = (
-                        split_type + "_" + os.path.basename(csv).split(".csv")[0]
-                    )
-                    neuroglancer_url = df["neuroglancer url"][0]
+                    neuroglancer_url = pd.read_csv(csv)["neuroglancer url"][0]
                     state = parse_url(neuroglancer_url)
+                    layer_name = (
+                        split_method + "_" + os.path.basename(csv).split(".csv")[0]
+                    )
+                    transform = neuroglancer.CoordinateSpaceTransform(
+                        input_dimensions=neuroglancer.CoordinateSpace(
+                            names=["x", "y", "z"],
+                            units=["m", "m", "m"],
+                            scales=np.array([1e-9, 1e-9, 1e-9])
+                            * self.coordinate_scaling,  # annotation resolution
+                        ),
+                        output_dimensions=neuroglancer.CoordinateSpace(
+                            names=["x", "y", "z"],
+                            units=["m", "m", "m"],
+                            scales=[1e-9, 1e-9, 1e-9],  # desired output voxel size
+                        ),
+                    )
                     for layer in state.layers:
                         if (
                             layer.name == "fibsem-uint8"
+                            or layer.name == "fibsem-uint16"
                             or layer.name == "raw"
                             and is_first
                         ):
                             layer.name = "raw"
                             s.layers["raw"] = layer
                         if layer.name == "saved_annotations":
-                            layer.name = layer_name
-                            s.layers[layer_name] = layer
+                            # layer.source is a LayerDataSources (list-like container)
+                            # Get the URL from the first source
+                            first_source = layer.source[0]
+                            if hasattr(first_source, "url"):
+                                annotation_source_url = first_source.url
+                            else:
+                                # If it's already a string, use it directly
+                                annotation_source_url = str(first_source)
 
-            s.layers["rois"] = neuroglancer.AnnotationLayer(
-                source=self.rois_as_annotations,
-                shader="""
-                void main() {
-                    setColor(prop_box_color());
-                }
-                """,
-            )
+                            # Create a new AnnotationLayer with a LayerDataSource that includes the transform
+                            # Pass URL as first positional argument, transform as keyword argument
+                            s.layers[layer_name] = neuroglancer.AnnotationLayer(
+                                source=neuroglancer.LayerDataSource(
+                                    annotation_source_url,
+                                    transform=transform,
+                                )
+                            )
+
+            # Create rois layer with transform if available
+            if transform is not None:
+                s.layers["rois"] = neuroglancer.AnnotationLayer(
+                    source=neuroglancer.LayerDataSource(
+                        self.rois_as_annotations,
+                        transform=transform,
+                    ),
+                    shader="""
+                    void main() {
+                        setColor(prop_box_color());
+                    }
+                    """,
+                )
+            else:
+                s.layers["rois"] = neuroglancer.AnnotationLayer(
+                    source=self.rois_as_annotations,
+                    shader="""
+                    void main() {
+                        setColor(prop_box_color());
+                    }
+                    """,
+                )
         self.neuroglancer_url = neuroglancer.to_url(viewer.state)
         print(f"Neuroglancer view:\n{self.neuroglancer_url}")
 

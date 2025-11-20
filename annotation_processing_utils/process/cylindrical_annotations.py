@@ -1,38 +1,36 @@
+import warnings as _warnings
+
+_warnings.filterwarnings("ignore", message="IProgress not found")
+
 import numpy as np
 import pandas as pd
 import zarr
 from tqdm import tqdm
 from numcodecs.gzip import GZip
 import os
-
-import socket
-import neuroglancer
-import numpy as np
-
-import neuroglancer
-import neuroglancer.cli
 import struct
-import os
-import struct
-import numpy as np
 import json
-import pandas as pd
-from tqdm import tqdm
 import shutil
-from annotation_processing_utils.utils.bresenham3D import bresenham3DWithMask
-
 import warnings
-from .training_validation_test_roi_calculator import TrainingValidationTestRoiCalculator
-from funlib.persistence import open_ds
 import itertools
-from neuroglancer.url_state import parse_url
-from ..utils.zarr_util import create_multiscale_dataset
 import pickle
-from funlib.geometry import Coordinate
-from ..utils.dacapo_util import DacapoRunBuilder
-from dacapo.experiments.starts import StartConfig
 import getpass
-from dacapo.experiments.starts import CosemStartConfig
+
+from annotation_processing_utils.utils.bresenham3D import bresenham3DWithMask
+from .training_validation_test_roi_calculator import (
+    TrainingValidationTestRoiCalculator,
+    drop_close_duplicates_allclose,
+)
+from funlib.persistence import open_ds
+from funlib.geometry import Coordinate
+from ..utils.zarr_util import (
+    create_multiscale_dataset,
+    create_multiscale_dataset_with_tensorstore,
+)
+
+
+# Heavy imports - lazy loaded when needed
+# neuroglancer, dacapo imports moved to functions that use them
 
 
 class VoxelNmConverter:
@@ -86,6 +84,7 @@ class CylindricalAnnotations:
         radius,
         training_validation_test_roi_info_yaml,
         output_annotations_directory=None,
+        output_neuroglancer_link_directory=None,
         output_mask_zarr=None,
         output_gt_zarr=None,
         output_training_points_zarr=None,
@@ -93,6 +92,7 @@ class CylindricalAnnotations:
         training_point_selection_mode="all",
         raw_path=None,
         debug=False,
+        num_training_points=None,
     ):
         np.random.seed(0)  # set seed for consistency of locations
         self.username = getpass.getuser()
@@ -107,6 +107,11 @@ class CylindricalAnnotations:
             output_training_points_zarr = f"/nrs/cellmap/{self.username}/cellmap/{self.organelle}/training_points.zarr"
         if not output_annotations_directory:
             output_annotations_directory = f"/groups/cellmap/cellmap/{self.username}/neuroglancer_annotations/{self.organelle}"
+        if not output_neuroglancer_link_directory:
+            output_neuroglancer_link_directory = f"/nrs/cellmap/{self.username}/cellmap/{self.organelle}/neuroglancer_links"
+
+        # Store raw_path for later use in neuroglancer URL generation
+        self.raw_path = raw_path
 
         if raw_path:
             raw_zarr, raw_dataset_name = split_dataset_path(raw_path)
@@ -118,8 +123,8 @@ class CylindricalAnnotations:
                 raw_dataset_name = "/volumes/raw/s0"
             elif "recon-1":
                 raw_dataset_name = "/recon-1/em/fibsem-uint8/s0"
-
         self.raw_dataset = open_ds(raw_zarr, raw_dataset_name)
+        self.voxel_size = self.raw_dataset.voxel_size
 
         self.output_mask_zarr = output_mask_zarr
         self.output_gt_zarr = output_gt_zarr
@@ -127,25 +132,36 @@ class CylindricalAnnotations:
         self.output_annotations_directory = (
             output_annotations_directory + "/" + self.dataset
         )
+        self.output_neuroglancer_link_directory = output_neuroglancer_link_directory
         self.empty_annotations = []
         self.radius = radius
 
+        # Create roi_calculator which reads coordinate_scaling from YAML
         self.roi_calculator = TrainingValidationTestRoiCalculator(
             training_validation_test_roi_info_yaml
         )
+
+        # Get coordinate_scaling from roi_calculator
+        self.coordinate_scaling = self.roi_calculator.coordinate_scaling
         if self.roi_calculator.resolution / self.raw_dataset.voxel_size[0] == 2:
-            print(
-                f"Using scale s1 to get a resolution of {self.raw_dataset.voxel_size[0]}"
-            )
             raw_dataset_name = raw_dataset_name.replace("/s0", "/s1")
             self.raw_dataset = open_ds(raw_zarr, raw_dataset_name)
 
-        self.roi_calculator.standard_processing(self.output_annotations_directory)
+        self.roi_calculator.standard_processing(
+            self.output_annotations_directory,
+        )
         self.training_point_selection_mode = training_point_selection_mode
+        self.keep_all_valid_training_points = (
+            self.roi_calculator.keep_all_valid_training_points
+        )
 
         # 36x36x36 is shape of region used to caluclate loss,so we need to make sure that the center is at least the diagonal away from the validation/test rois
         self.longest_box_diagonal = int(np.ceil(np.sqrt(3 * (36**2)))) + 1
         self.debug = debug  # if true, only use first 100 annotations
+        self.num_training_points = num_training_points
+        # Lazy import neuroglancer only when needed
+        import neuroglancer
+
         neuroglancer.set_server_bind_address("0.0.0.0")
 
     def in_cylinder(self, end_1, end_2, radius):
@@ -181,7 +197,6 @@ class CylindricalAnnotations:
         return set(map(tuple, p[is_in_cylinder]))
 
     def extract_annotation_information(self):
-        self.voxel_size = self.raw_dataset.voxel_size
 
         # https://cell-map.slack.com/archives/C04N9JUFQK1/p1683733456153269
 
@@ -190,15 +205,16 @@ class CylindricalAnnotations:
             dfs.append(pd.read_csv(annotation_csv))
         df = pd.concat(dfs)
         # remove duplicate rows from dataframe
-        df = df.drop_duplicates(
-            subset=[
+        df = drop_close_duplicates_allclose(
+            df,
+            coord_cols=[
                 "start z (nm)",
                 "start y (nm)",
                 "start x (nm)",
                 "end z (nm)",
                 "end y (nm)",
                 "end x (nm)",
-            ]
+            ],
         )
         # # use only first 500 annotations
         if self.debug:
@@ -211,6 +227,10 @@ class CylindricalAnnotations:
             np.array([df["end z (nm)"], df["end y (nm)"], df["end x (nm)"]]).T
             / self.voxel_size[0]
         )
+
+        self.annotation_starts = self.annotation_starts * self.coordinate_scaling
+        self.annotation_ends = self.annotation_ends * self.coordinate_scaling
+        self.annotation_centers = (self.annotation_starts + self.annotation_ends) / 2
 
     def get_negative_examples(filename="annotations_20230620_221638.csv"):
         negative_examples = pd.read_csv(filename)
@@ -241,16 +261,19 @@ class CylindricalAnnotations:
         return negative_example_centers
 
     def write_annotations_as_cylinders_and_get_intersections(self, radius):
-        # get all pd voxels and all overlapping/intersecting voxels between multiple pd
+        # Sequential processing - faster than parallel due to low per-annotation overhead
         self.all_annotation_voxels = []
         self.all_annotation_voxels_set = set()
         self.intersection_voxels_set = set()
+
+        # Compute cylinder voxels and intersections
         for annotation_start, annotation_end in tqdm(
             zip(self.annotation_starts, self.annotation_ends),
+            desc="Computing cylinder voxels and intersections",
             total=len(self.annotation_starts),
         ):
             voxels_in_cylinder = self.in_cylinder(
-                annotation_start, annotation_end, radius=radius
+                annotation_start, annotation_end, radius
             )
             self.all_annotation_voxels.append(list(voxels_in_cylinder))
             self.intersection_voxels_set.update(
@@ -258,8 +281,8 @@ class CylindricalAnnotations:
             )
             self.all_annotation_voxels_set.update(voxels_in_cylinder)
 
-        # repeat but now will write out the relevant voxels with appropriate id
-        ds = create_multiscale_dataset(
+        # Create dataset with tensorstore for fast writing
+        ds = create_multiscale_dataset_with_tensorstore(
             output_path=f"{self.output_gt_zarr}/{self.dataset}",
             dtype="u2",
             voxel_size=self.voxel_size,
@@ -270,63 +293,110 @@ class CylindricalAnnotations:
 
         all_annotation_id = 1
         annotation_id = 1
-        # self.all_annotation_voxels_set -= self.intersection_voxels_set
-        for annotation_start, annotation_end in tqdm(
-            zip(self.annotation_starts, self.annotation_ends),
+        shape = ds.data.shape
+
+        # Collect all voxel assignments for batch writing
+        all_voxel_coords = []
+        all_voxel_values = []
+
+        for annotation_start, annotation_end, voxels_in_cylinder in tqdm(
+            zip(
+                self.annotation_starts,
+                self.annotation_ends,
+                self.all_annotation_voxels,
+            ),
+            desc="Collecting voxel assignments",
             total=len(self.annotation_starts),
         ):
-            voxels_in_cylinder = (
-                self.in_cylinder(annotation_start, annotation_end, radius=radius)
-                - self.intersection_voxels_set
-            )
-            if len(voxels_in_cylinder) > 0:
-                voxels_in_cylinder = np.array(list(voxels_in_cylinder))
-                ds.data[
-                    voxels_in_cylinder[:, 0],
-                    voxels_in_cylinder[:, 1],
-                    voxels_in_cylinder[:, 2],
-                ] = annotation_id
-                annotation_id += 1
-                all_annotation_id += 1
-            else:
+            try:
+                voxels_in_cylinder = set(voxels_in_cylinder)
+                voxels_in_cylinder -= self.intersection_voxels_set
+
+                if len(voxels_in_cylinder) > 0:
+                    voxels_in_cylinder = np.array(list(voxels_in_cylinder))
+
+                    # Boolean mask for voxels that are inside the valid range
+                    valid_mask = (
+                        (voxels_in_cylinder[:, 0] >= 0)
+                        & (voxels_in_cylinder[:, 0] < shape[0])
+                        & (voxels_in_cylinder[:, 1] >= 0)
+                        & (voxels_in_cylinder[:, 1] < shape[1])
+                        & (voxels_in_cylinder[:, 2] >= 0)
+                        & (voxels_in_cylinder[:, 2] < shape[2])
+                    )
+
+                    # Keep only the valid ones
+                    voxels_in_cylinder = voxels_in_cylinder[valid_mask]
+
+                    if len(voxels_in_cylinder) > 0:
+                        # Collect for batch write
+                        all_voxel_coords.append(voxels_in_cylinder)
+                        all_voxel_values.append(
+                            np.full(len(voxels_in_cylinder), annotation_id, dtype="u2")
+                        )
+                        annotation_id += 1
+                        all_annotation_id += 1
+                    else:
+                        self.empty_annotations.append(all_annotation_id)
+                        all_annotation_id += 1
+                        warnings.warn(
+                            f"Empty annotation #{all_annotation_id-1} ({annotation_start}-{annotation_end}) will be ignored"
+                        )
+                else:
+                    self.empty_annotations.append(all_annotation_id)
+                    all_annotation_id += 1
+                    warnings.warn(
+                        f"Empty annotation #{all_annotation_id-1} ({annotation_start}-{annotation_end}) will be ignored"
+                    )
+            except Exception as e:
                 self.empty_annotations.append(all_annotation_id)
                 all_annotation_id += 1
                 warnings.warn(
-                    f"Empty annotation #{all_annotation_id-1} ({annotation_start}-{annotation_end}) will be ignored"
+                    f"Error processing annotation #{all_annotation_id-1}: {e}"
                 )
+                continue
+
+        # Batch write all voxels at once using tensorstore - much faster!
+        if all_voxel_coords:
+            print(f"Writing {len(all_voxel_coords)} annotations in batch...")
+            all_coords = np.vstack(all_voxel_coords)
+            all_values = np.concatenate(all_voxel_values)
+            ds.data[
+                all_coords[:, 0],
+                all_coords[:, 1],
+                all_coords[:, 2],
+            ] = all_values
+            # Set world-readable permissions after writing
+            ds.set_permissions()
 
     def write_intersection_mask(self):
-        create_multiscale_dataset(
+        ds = create_multiscale_dataset_with_tensorstore(
             output_path=f"{self.output_mask_zarr}/{self.dataset}",
             dtype="u1",
             voxel_size=self.voxel_size,
             total_roi=self.raw_dataset.roi,
             write_size=self.voxel_size * 128,
             delete=True,
+            fill_value=1,  # Set fill_value=1 in metadata only (sparse storage)
         )
-        zarray_metadata_path = f"{self.output_mask_zarr}/{self.dataset}/s0/.zarray"
-        # Load the .zarray metadata
-        with open(zarray_metadata_path, "r") as f:
-            zarray_metadata = json.load(f)
 
-        zarray_metadata["fill_value"] = 1
-
-        # Save the updated metadata back to the .zarray file
-        with open(zarray_metadata_path, "w") as f:
-            json.dump(zarray_metadata, f, indent=4)
-
-        ds = open_ds(self.output_mask_zarr, self.dataset + "/s0", mode="a")
-
+        # Only write the zeros (intersection voxels)
+        # All other voxels will read as 1 due to fill_value in metadata
         intersection_voxels = np.array(list(self.intersection_voxels_set))
         if len(intersection_voxels) > 0:
+            print(
+                f"Writing {len(intersection_voxels)} intersection mask voxels (zeros)..."
+            )
             ds.data[
                 intersection_voxels[:, 0],
                 intersection_voxels[:, 1],
                 intersection_voxels[:, 2],
             ] = 0
+        # Set world-readable permissions after writing
+        ds.set_permissions()
 
     def write_training_points(self):
-        ds = create_multiscale_dataset(
+        ds = create_multiscale_dataset_with_tensorstore(
             output_path=f"{self.output_training_points_zarr}/{self.dataset}",
             dtype="u1",
             voxel_size=self.voxel_size,
@@ -334,19 +404,25 @@ class CylindricalAnnotations:
             write_size=self.voxel_size * 128,
             delete=True,
         )
-        # convert list of training point tuples to numpy array
-        for current_training_points in tqdm(self.training_points_by_object):
-            current_training_points_voxels = (
-                np.array(current_training_points) / self.voxel_size[0]
-            )
-            current_training_points_voxels = current_training_points_voxels.astype(int)
-            ds.data[
-                current_training_points_voxels[:, 0],
-                current_training_points_voxels[:, 1],
-                current_training_points_voxels[:, 2],
-            ] = 1
 
+        # Flatten all training points and convert to voxel coordinates in one go
         self.training_points = list(itertools.chain(*self.training_points_by_object))
+
+        if len(self.training_points) > 0:
+            print(f"Writing {len(self.training_points)} training points in batch...")
+            # Convert all points at once - much faster than per-object
+            all_training_points_voxels = (
+                np.array(self.training_points) / self.voxel_size[0]
+            ).astype(int)
+
+            # Single batch write instead of loop
+            ds.data[
+                all_training_points_voxels[:, 0],
+                all_training_points_voxels[:, 1],
+                all_training_points_voxels[:, 2],
+            ] = 1
+        # Set world-readable permissions after writing
+        ds.set_permissions()
 
     def get_pseudorandom_training_centers(self, random_shift_voxels=None):
         def point_is_valid_center_for_current_roi(pt, edge_length, offset, shape):
@@ -437,6 +513,7 @@ class CylindricalAnnotations:
                     warnings.warn(f"empty id {id} {annotation_start} {annotation_end}")
                 # c = np.round(((annotation_start + annotation_end) * self.resolution / 2)).astype(int)
                 self.removed_ids.append(id)
+
         print(
             f"number of original centers: {len(self.annotation_starts)}, number of training centers: {len(self.training_points_by_object)}"
         )
@@ -537,19 +614,57 @@ class CylindricalAnnotations:
 
             return valid_idxs
 
+        def is_valid_center(center):
+            # If keep_all_valid_training_points is True, skip the training ROI check
+            if self.keep_all_valid_training_points:
+                return True
+
+            # is a valid center if it is within one and only one rois_dict["training"]
+            count = 0
+            for roi in self.roi_calculator.rois_dict["training"].values():
+                roi = roi.snap_to_grid(
+                    3 * [self.voxel_size[0]],
+                    mode="shrink",
+                )
+
+                # do this to keep things in voxels for splitting along exact voxel
+                roi /= int(self.voxel_size[0])
+                if all(
+                    center[d] >= roi.offset[d]
+                    and center[d] <= roi.offset[d] + roi.shape[d]
+                    for d in range(3)
+                ):
+                    count += 1
+
+            return count == 1
+
         self.training_points_by_object = []
         self.removed_ids = []
-        for id, cylinder_voxels in tqdm(
-            enumerate(self.all_annotation_voxels), total=len(self.all_annotation_voxels)
+        for id, (cylinder_voxels, center_voxels) in tqdm(
+            enumerate(
+                zip(
+                    self.all_annotation_voxels,
+                    self.roi_calculator.all_annotation_centers_voxels,
+                ),
+            ),
+            total=len(self.all_annotation_voxels),
         ):
             if len(cylinder_voxels) == 0:
                 warnings.warn(f"empty id {id+1}")
                 self.removed_ids.append(id + 1)
                 continue
 
+            if not is_valid_center(center_voxels):
+                self.removed_ids.append(id + 1)
+                continue
+
             found_valid_point = False
             cylinder_voxels = np.array(cylinder_voxels)
-            valid_idxs = get_valid_idxs(cylinder_voxels, self.longest_box_diagonal)
+            # Use 36 since we want to include both the current roi and the neighboring roi boxes
+            valid_idxs = get_valid_idxs(
+                cylinder_voxels,
+                np.ceil(np.sqrt(3 * (36 + random_shift_voxels) ** 2) + 1),
+            )
             if np.sum(valid_idxs) > 0:
                 valid_voxels = cylinder_voxels[valid_idxs]
                 valid_voxels = np.round(valid_voxels * self.voxel_size[0]).astype(int)
@@ -557,7 +672,7 @@ class CylindricalAnnotations:
                     random_shift = random_shift_voxels * self.voxel_size[0]
                     valid_voxels += np.random.randint(
                         -random_shift,
-                        random_shift,
+                        random_shift + 1,
                         size=(len(valid_voxels), 3),
                     )
                 # map cylinder voxels to tuple
@@ -568,6 +683,48 @@ class CylindricalAnnotations:
             if not found_valid_point:
                 self.removed_ids.append(id + 1)
 
+    def subsample_training_points(self):
+        num_objects = len(self.training_points_by_object)
+        # determine number of training points per object, round whichever way is closest to the desired number
+        number_training_points_per_object_ceiling = int(
+            np.ceil(self.num_training_points / num_objects)
+        )
+        number_of_training_points_floor = int(
+            np.floor(self.num_training_points / num_objects)
+        )
+        if abs(
+            number_training_points_per_object_ceiling * num_objects
+            - self.num_training_points
+        ) < abs(
+            number_of_training_points_floor * num_objects - self.num_training_points
+        ):
+            num_training_points_per_object = number_training_points_per_object_ceiling
+        else:
+            num_training_points_per_object = number_of_training_points_floor
+
+        print(
+            f"Sampling to {num_training_points_per_object*num_objects} of desired {self.num_training_points} training points: {num_training_points_per_object} training points per object"
+        )
+        subsampled_training_points_by_object = []
+
+        for points in self.training_points_by_object:
+            n = len(points)
+            with_replacement = n < num_training_points_per_object
+
+            if with_replacement:
+                # can request more than n; repeats are allowed
+                k = num_training_points_per_object
+                idx = np.random.choice(n, size=k, replace=True)
+            else:
+                # must not request more than n; no repeats
+                k = min(num_training_points_per_object, n)
+                idx = np.random.choice(n, size=k, replace=False)
+
+            chosen = [points[i] for i in idx]
+            subsampled_training_points_by_object.append(chosen)
+
+        self.training_points_by_object = subsampled_training_points_by_object
+
     def remove_validation_or_test_annotations_from_training(self, mode="all"):
         if mode == "deprecated_use_only_single_point":
             self.get_pseudorandom_training_centers()
@@ -577,6 +734,9 @@ class CylindricalAnnotations:
             self.get_all_training_points(random_shift_voxels=18)
         else:
             raise Exception(f"mode {mode} not recognized")
+
+        if self.num_training_points:
+            self.subsample_training_points()
 
     def write_out_annotations(self, output_directory, annotation_ids):
         annotation_type = "line"
@@ -642,6 +802,8 @@ class CylindricalAnnotations:
         print(f"annotations: {precomputed_path}")
 
     def visualize_removed_annotations(self, roi, radius):
+        import neuroglancer
+
         def add_segmentation_layer(state, data, name):
             dimensions = neuroglancer.CoordinateSpace(
                 names=["z", "y", "x"], units="nm", scales=3 * [self.voxel_size[0]]
@@ -717,9 +879,86 @@ class CylindricalAnnotations:
         )
         url = f"https://neuroglancer-demo.appspot.com/#!%7B%22dimensions%22:%7B%22x%22:%5B1e-9%2C%22m%22%5D%2C%22y%22:%5B1e-9%2C%22m%22%5D%2C%22z%22:%5B1e-9%2C%22m%22%5D%7D%2C%22position%22:%5B0.0%2C0.0%2C0.0%5D%2C%22crossSectionScale%22:1%2C%22projectionScale%22:16384%2C%22layers%22:%5B%7B%22type%22:%22image%22%2C%22source%22:%22n5://https://cellmap-vm1.int.janelia.org/nrs/data/{self.dataset}/{self.dataset}.n5/{self.raw_dataset_name}/%22%2C%22tab%22:%22source%22%2C%22name%22:%22fibsem-uint8%22%7D%2C%7B%22type%22:%22annotation%22%2C%22source%22:%22precomputed://https://cellmap-vm1.int.janelia.org/dm11/{self.username}/neuroglancer_annotations/{self.organelle}/splitting/{self.dataset}/bounding_boxes%22%2C%22tab%22:%22rendering%22%2C%22shader%22:%22%5Cnvoid%20main%28%29%20%7B%5Cn%20%20setColor%28prop_box_color%28%29%5Cn%20%20%20%20%20%20%20%20%20%20%29%3B%5Cn%7D%5Cn%22%2C%22name%22:%22bounding_boxes%22%7D%2C%7B%22type%22:%22segmentation%22%2C%22source%22:%22n5://https://cellmap-vm1.int.janelia.org/nrs/{self.username}/cellmap/{self.organelle}/{self.organelle}.n5/{self.dataset}/%22%2C%22tab%22:%22source%22%2C%22segments%22:%5B%5D%2C%22name%22:%22{self.organelle}%22%7D%2C%7B%22type%22:%22annotation%22%2C%22source%22:%22precomputed://https://cellmap-vm1.int.janelia.org/dm11/{self.username}/neuroglancer_annotations/{annotation_datetime}%22%2C%22tab%22:%22source%22%2C%22name%22:%22{annotation_datetime}%22%7D%5D%2C%22selectedLayer%22:%7B%22visible%22:true%2C%22layer%22:%2220230830_155757%22%7D%2C%22layout%22:%224panel%22%7D"
         print(url)
+        # save url to file
+        with open(
+            f"{self.output_neuroglancer_link_directory}/neuroglancer_view_url.txt", "w"
+        ) as f:
+            f.write(url)
 
     def get_neuroglancer_url(self):
+        import neuroglancer
+        from neuroglancer.url_state import parse_url
+
         state = parse_url(self.roi_calculator.neuroglancer_url)
+
+        # Make all original annotation layers not visible
+        for layer in state.layers:
+            if hasattr(layer, "visible"):
+                layer.visible = False
+        # Make ROIs visible
+        if "rois" in state.layers and hasattr(state.layers["rois"], "visible"):
+            state.layers["rois"].visible = True
+
+        # If raw_path is provided, add it first (remove s0 scale if present)
+        if self.raw_path:
+            raw_path_for_neuroglancer = self.raw_path.replace("/s0", "").replace(
+                "/s1", ""
+            )
+            # Convert path to neuroglancer format
+            raw_path_for_neuroglancer = (
+                raw_path_for_neuroglancer.replace("/nrs/cellmap/data", "nrs/data")
+                .replace("/nrs/cellmap", "nrs/")
+                .replace("/dm11/cellmap", "dm11/")
+                .replace("/prfs/cellmap", "prfs/")
+            )
+
+            if "s3://:" not in raw_path_for_neuroglancer:
+                # Determine format based on file extension in path
+                if ".zarr" in raw_path_for_neuroglancer:
+                    raw_path_for_neuroglancer = (
+                        "zarr://https://cellmap-vm1.int.janelia.org/"
+                        + raw_path_for_neuroglancer
+                    )
+                elif ".n5" in raw_path_for_neuroglancer:
+                    raw_path_for_neuroglancer = (
+                        "n5://https://cellmap-vm1.int.janelia.org/"
+                        + raw_path_for_neuroglancer
+                    )
+
+            # Use coordinate_scaling to calculate actual resolution if provided
+            if not np.array_equal(self.coordinate_scaling, np.array([1, 1, 1])):
+                # Calculate actual_resolution from coordinate_scaling
+                # coordinate_scaling = voxel_size / actual_resolution
+                # so actual_resolution = voxel_size / coordinate_scaling
+                actual_resolution = np.array(self.voxel_size) / self.coordinate_scaling
+                # Create coordinate space with the actual resolution
+                dimensions = neuroglancer.CoordinateSpace(
+                    names=["z", "y", "x"],
+                    units="nm",
+                    scales=[
+                        actual_resolution[0],
+                        actual_resolution[1],
+                        actual_resolution[2],
+                    ],
+                )
+                state.dimensions = dimensions
+
+            # Add raw layer using dict-style assignment (will appear at end, but that's fine)
+            state.layers["raw"] = neuroglancer.ImageLayer(
+                source=raw_path_for_neuroglancer
+            )
+
+        # Set up coordinate space for output layers using voxel_size
+        output_dimensions = neuroglancer.CoordinateSpace(
+            names=["z", "y", "x"],
+            units="nm",
+            scales=[
+                self.voxel_size[0],
+                self.voxel_size[1],
+                self.voxel_size[2],
+            ],
+        )
+
         for name, zarr_path in zip(
             ["mask", "annotations_as_cylinders", "training_points"],
             [
@@ -729,36 +968,94 @@ class CylindricalAnnotations:
             ],
         ):
             zarr_path = (
-                zarr_path.replace("/nrs/cellmap", "nrs/")
+                zarr_path.replace("/nrs/cellmap/data", "nrs/data")
+                .replace("/nrs/cellmap", "nrs/")
                 .replace("/dm11/cellmap", "dm11/")
                 .replace("/prfs/cellmap", "prfs/")
             )
-            zarr_path = "zarr://https://cellmap-vm1.int.janelia.org/" + zarr_path
-            state.layers[name] = neuroglancer.SegmentationLayer(
-                source=zarr_path + "/" + self.dataset
+            if "s3://:" not in zarr_path:
+                zarr_path = "zarr://https://cellmap-vm1.int.janelia.org/" + zarr_path
+
+            # Create layer with source using output dimensions
+            layer = neuroglancer.SegmentationLayer(
+                source=neuroglancer.LayerDataSource(
+                    url=zarr_path + "/" + self.dataset,
+                    transform=neuroglancer.CoordinateSpaceTransform(
+                        output_dimensions=output_dimensions
+                    ),
+                )
             )
+            state.layers[name] = layer
+            # Turn off mask layer visibility (must be done after adding to state)
+            if name == "mask":
+                if hasattr(state.layers[name], "visible"):
+                    state.layers[name].visible = False
+
         if len(self.removed_ids):
             print(f"{len(self.removed_ids)=}")
-            state.layers["removed_annotations"] = neuroglancer.AnnotationLayer(
+            removed_layer = neuroglancer.AnnotationLayer(
                 source=f"{self.output_annotations_directory}/removed_annotations".replace(
                     "/nrs/cellmap/",
                     "precomputed://https://cellmap-vm1.int.janelia.org/nrs/",
                 )
             )
+            state.layers["removed_annotations"] = removed_layer
+            # Make removed annotations visible
+            if hasattr(state.layers["removed_annotations"], "visible"):
+                state.layers["removed_annotations"].visible = True
+
             if len(self.removed_ids) != len(self.annotation_starts):
-                state.layers["kept_annotations"] = neuroglancer.AnnotationLayer(
+                kept_layer = neuroglancer.AnnotationLayer(
                     source=f"{self.output_annotations_directory}/kept_annotations".replace(
                         "/nrs/cellmap/",
                         "precomputed://https://cellmap-vm1.int.janelia.org/nrs/",
                     )
                 )
-        self.neuroglancer_url = neuroglancer.to_url(state)
-        # write urls to a file
-        with open(
-            f"{self.output_annotations_directory}/neuroglancer_url.txt", "w"
-        ) as f:
+                state.layers["kept_annotations"] = kept_layer
+                # Make kept annotations visible
+                if hasattr(state.layers["kept_annotations"], "visible"):
+                    state.layers["kept_annotations"].visible = True
+
+        # Calculate center of all annotations
+        import numpy as np
+
+        if len(self.annotation_centers) > 0:
+            # Get the mean center across all annotations
+            mean_center = np.mean(self.annotation_centers, axis=0)
+            # Set position to center of annotations (in physical coordinates)
+            state.position = mean_center.tolist()
+
+        # Enable ROI display in neuroglancer
+        state.show_slices = False  # Turn off slice views to show ROIs better
+
+        # Save state to JSON file
+        import os
+        import json
+
+        dataset_dir = f"{self.output_neuroglancer_link_directory}/{self.dataset}"
+        os.makedirs(dataset_dir, exist_ok=True)
+
+        state_file_path = f"{dataset_dir}/state.json"
+
+        # Convert state to JSON
+        state_json = state.to_json()
+
+        with open(state_file_path, "w") as f:
+            json.dump(state_json, f, indent=2)
+
+        # Create neuroglancer URL pointing to the state.json file
+        # Replace /nrs/cellmap/ with https://cellmap-vm1.int.janelia.org/nrs/
+        state_url = state_file_path.replace(
+            "/nrs/cellmap/", "https://cellmap-vm1.int.janelia.org/nrs/"
+        )
+
+        self.neuroglancer_url = f"https://neuroglancer-demo.appspot.com/#!{state_url}"
+
+        # Also write the URL to a text file for easy access
+        with open(f"{dataset_dir}/neuroglancer_url.txt", "w") as f:
             f.write(self.neuroglancer_url)
 
+        print(f"Neuroglancer state saved to: {state_file_path}")
         print(f"Neuroglancer url:\n{self.neuroglancer_url}")
 
     def standard_processing(self):
@@ -814,13 +1111,24 @@ class CylindricalAnnotations:
         self,
         base_lr=2.5e-5,
         batch_size=2,
+        raw_min=None,
+        raw_max=None,
+        num_lsd_voxels=None,
         lsds_to_affs_weight_ratio=0.5,
         validation_interval=5000,
         snapshot_interval=10000,
         iterations=500000,
         repetitions=3,
-        start_config=CosemStartConfig("setup04", "1820500"),
+        start_config=None,
+        invert=False,
+        delete_existing=False,
     ):
+        from ..utils.dacapo_util import DacapoRunBuilder
+        from dacapo.experiments.starts import CosemStartConfig
+
+        if start_config is None:
+            start_config = CosemStartConfig("setup04", "1820500")
+
         DacapoRunBuilder(
             self.dataset,
             self.organelle,
@@ -831,12 +1139,18 @@ class CylindricalAnnotations:
             validation_rois_dict=self.roi_calculator.rois_dict["validation"],
             base_lr=base_lr,
             batch_size=batch_size,
+            raw_min=raw_min,
+            raw_max=raw_max,
+            invert=invert,
+            raw_path=self.raw_path,
+            num_lsd_voxels=num_lsd_voxels,
             lsds_to_affs_weight_ratio=lsds_to_affs_weight_ratio,
             validation_interval=validation_interval,
             snapshot_interval=snapshot_interval,
             iterations=iterations,
             repetitions=repetitions,
             start_config=start_config,
+            delete_existing=delete_existing,
         )
 
     @staticmethod
@@ -849,16 +1163,28 @@ class CylindricalAnnotations:
         snapshot_interval=10000,
         iterations=500000,
         repetitions=3,
-        start_config=CosemStartConfig("setup04", "1820500"),
+        num_lsd_voxels=None,
+        start_config=None,
+        delete_existing=False,
+        run_base_name=None,
     ):
+        from ..utils.dacapo_util import DacapoRunBuilder
+        from dacapo.experiments.starts import CosemStartConfig
+
+        if start_config is None:
+            start_config = CosemStartConfig("setup04", "1820500")
+
         DacapoRunBuilder(
             datasplit_config=datasplit_config,
             base_lr=base_lr,
             batch_size=batch_size,
+            num_lsd_voxels=num_lsd_voxels,
             lsds_to_affs_weight_ratio=lsds_to_affs_weight_ratio,
             validation_interval=validation_interval,
             snapshot_interval=snapshot_interval,
             iterations=iterations,
             repetitions=repetitions,
             start_config=start_config,
+            delete_existing=delete_existing,
+            run_base_name=run_base_name,
         )

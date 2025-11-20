@@ -52,6 +52,23 @@ def run_inference():
         required=True,
     )
     parser.add_argument(
+        "--raw_min",
+        type=float,
+        help="The minimum value for the raw data",
+        required=True,
+    )
+    parser.add_argument(
+        "--raw_max",
+        type=float,
+        help="The maximum value for the raw data",
+        required=True,
+    )
+    parser.add_argument(
+        "--invert",
+        action="store_true",
+        help="Invert the raw data",
+    )
+    parser.add_argument(
         "--roi_offset",
         type=str,
         help="The offset of the roi - in world units - as a comma separated list",
@@ -70,7 +87,16 @@ def run_inference():
         [float(c) for c in args.roi_offset.split(",")],
         [float(c) for c in args.roi_shape.split(",")],
     )
-    inference(args.run, args.iteration, args.raw_path, args.inference_path, roi)
+    inference(
+        args.run,
+        args.iteration,
+        args.raw_path,
+        args.raw_min,
+        args.raw_max,
+        args.invert,
+        args.inference_path,
+        roi,
+    )
 
 
 def run_mws():
