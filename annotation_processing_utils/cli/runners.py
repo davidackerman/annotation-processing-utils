@@ -80,6 +80,12 @@ def run_inference():
         help="The shape of the roi - in world units -  as a comma separated list",
         required=True,
     )
+    parser.add_argument(
+        "--input_shape_scaling_factor",
+        type=float,
+        help="Factor by which to scale the input shape and output size (default: 2)",
+        default=2,
+    )
 
     args = parser.parse_args()
 
@@ -96,6 +102,7 @@ def run_inference():
         args.invert,
         args.inference_path,
         roi,
+        args.input_shape_scaling_factor,
     )
 
 
@@ -118,7 +125,7 @@ def run_mws():
     )
     parser.add_argument(
         "--minimum_volume_nm_3",
-        type=int,
+        type=float,
         help="Minimum volume in nm^3",
         required=False,
         default=0,
@@ -161,10 +168,22 @@ def run_mws():
         help="Mask if applicable (where a 0 indicates a region to ignore)",
         required=False,
     )
+    parser.add_argument(
+        "--chunk_shape",
+        default=None,
+        type=str,
+        help="Chunk shape for processing as comma-separated list (e.g., '216,216,216')",
+        required=False,
+    )
     args = parser.parse_args()
     mask_config = args.mask_config
     if mask_config is not None:
         mask_config = json.loads(mask_config)
+
+    chunk_shape = args.chunk_shape
+    if chunk_shape is not None:
+        chunk_shape = [int(x) for x in chunk_shape.split(',')]
+
     mws(
         args.affinities_path,
         args.segmentation_path,
@@ -174,6 +193,7 @@ def run_mws():
         args.lr_biases,
         args.filter_val,
         mask_config,
+        chunk_shape,
     )
 
 

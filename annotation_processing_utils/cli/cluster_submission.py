@@ -77,16 +77,12 @@ def get_arguments_per_submission(submision_yaml_path, submission_type):
         raw_max = current_analysis_info.get("raw_max", 255)
         invert = current_analysis_info.get("invert", False)
         mask_path = current_analysis_info.get("mask_path", None)
-        scale_coordinates = current_analysis_info.get(
-            "scale_coordinates", np.array([1, 1, 1])
-        )
         inference_base_path = Path(current_analysis_info["inference_base_path"])
         metrics_base_path = Path(current_analysis_info["metrics_base_path"])
 
         # get rois for this dataset
         roi_splitter = TrainingValidationTestRoiCalculator(
             current_analysis_info["training_validation_test_roi_yaml"],
-            scale_coordinates=scale_coordinates,
         )
         roi_splitter.get_training_validation_test_rois()
         rois_dict = roi_splitter.rois_dict
@@ -126,12 +122,16 @@ def get_arguments_per_submission(submision_yaml_path, submission_type):
                                     "--roi_shape": roi_shape,
                                     "--raw_min": raw_min,
                                     "--raw_max": raw_max,
-                                    "bsub_args": f"bsub -P cellmap -q gpu_short -n 4 -gpu num=1 -J inference-{run}-{roi_name}-iter{iteration}",
+                                    "bsub_args": (
+                                        f"bsub -P cellmap -q gpu_short -n 8 "
+                                        f'-gpu "num=1:gmem=20G" '
+                                        f"-J inference-{run}-{roi_name}-iter{iteration}"
+                                    ),
                                     "log_path": log_path,
                                 }
 
                                 if invert:
-                                    args["--invert"] = invert
+                                    args["--invert"] = ""  # Flag argument, no value needed
 
                                 arguments_per_submission.append(
                                     bsub_formatter(
@@ -156,7 +156,7 @@ def get_arguments_per_submission(submision_yaml_path, submission_type):
                                     args = {
                                         "--affinities_path": affinities_path,
                                         "--segmentation_path": base_segmentation_path,
-                                        "bsub_args": f"bsub -P cellmap -n 1 -J mws-{base_segmentation_path}",
+                                        "bsub_args": f"bsub -P cellmap -n 2 -J mws-{base_segmentation_path}",
                                         "log_path": current_log_path,
                                     }
 
@@ -195,6 +195,12 @@ def get_arguments_per_submission(submision_yaml_path, submission_type):
                                     if "filter_val" in current_postprocessing_sweep:
                                         args["--filter_val"] = (
                                             current_postprocessing_sweep["filter_val"]
+                                        )
+
+                                    if "chunk_shape" in postprocessing:
+                                        args["--chunk_shape"] = ",".join(
+                                            str(v)
+                                            for v in postprocessing["chunk_shape"]
                                         )
 
                                     arguments_per_submission.append(
@@ -265,7 +271,7 @@ def bsub_formatter(submission_arguments_dict, submission_type):
     log_path = log_path.as_posix()
 
     submission_args = " ".join(
-        [f"{k} {v}" for k, v in submission_arguments_dict.items()]
+        [f"{k} {v}".strip() if v != "" else k for k, v in submission_arguments_dict.items()]
     )
     submission_string = f"{bsub_args} -o {log_path}.o -e {log_path}.e run-{submission_type} {submission_args}"
     return submission_string
@@ -697,19 +703,32 @@ eval $COMMAND
     print(f"Submitting job array with {num_jobs} jobs for {submission_type}")
     print(f"Job array directory: {job_array_dir}")
 
-    result = subprocess.run(submit_cmd, shell=True, capture_output=True, text=True)
-    if result.returncode == 0:
-        job_id = result.stdout.strip().split("<")[1].split(">")[0]
-        print(f"Job array submitted successfully: {result.stdout.strip()}")
-        print(f"Monitor with: bjobs {job_id}")
-        print(f"Job array directory: {job_array_dir}")
+    try:
+        result = subprocess.run(
+            submit_cmd, shell=True, capture_output=True, text=True, timeout=30
+        )
+        if result.returncode == 0:
+            job_id = result.stdout.strip().split("<")[1].split(">")[0]
+            print(f"Job array submitted successfully: {result.stdout.strip()}")
+            print(f"Monitor with: bjobs {job_id}")
+            print(f"Job array directory: {job_array_dir}")
 
-        # Wait for completion and analyze results
-        wait_for_completion_and_analyze(job_array_dir, num_jobs, commands_file, job_id)
+            # Wait for completion and analyze results
+            wait_for_completion_and_analyze(
+                job_array_dir, num_jobs, commands_file, job_id
+            )
 
-        return job_array_dir
-    else:
-        print(f"Error submitting job array: {result.stderr.strip()}")
+            return job_array_dir
+        else:
+            print(f"Error submitting job array: {result.stderr.strip()}")
+            print(f"Command output: {result.stdout.strip()}")
+            return None
+    except subprocess.TimeoutExpired:
+        print(f"Error: Job submission timed out after 30 seconds")
+        print(
+            f"This may indicate an issue with the queue '{submission_type}' or bsub configuration"
+        )
+        print(f"Try checking the submission script manually: {script_file}")
         return None
 
 
