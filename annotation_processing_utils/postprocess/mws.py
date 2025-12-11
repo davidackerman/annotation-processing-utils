@@ -15,6 +15,7 @@ def mws(
     lr_biases,
     filter_val,
     mask_config=None,
+    chunk_shape=None,
 ):
     mutex_watershed_processor = MutexWatershed(
         affinities_path=affinities_path,
@@ -42,6 +43,6 @@ def mws(
         padding_voxels=27,
         do_opening=True,
         delete_tmp=True,
-        chunk_shape=None,
+        chunk_shape=chunk_shape,
     )
     mutex_watershed_processor.get_connected_components()

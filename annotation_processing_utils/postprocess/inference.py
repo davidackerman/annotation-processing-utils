@@ -28,8 +28,9 @@ import getpass
 
 logging.basicConfig(
     format="%(asctime)s %(levelname)-8s %(message)s",
-    level=logging.NOTSET,
+    level=logging.INFO,
     datefmt="%Y-%m-%d %H:%M:%S",
+    force=True,
 )
 logger = logging.getLogger(__name__)
 
@@ -48,6 +49,7 @@ def inference(
     invert: bool,
     inference_path: str,
     roi: Roi,
+    input_shape_scaling_factor: int = 1,
 ):
 
     architecture_config = DacapoRunBuilder.create_architecture()
@@ -101,4 +103,5 @@ def inference(
         compute_context=LocalTorch(),
         output_roi=roi,
         write_size=[108 * 8, 108 * 8, 108 * 8, 9],
+        input_shape_scaling_factor=input_shape_scaling_factor,
     )
