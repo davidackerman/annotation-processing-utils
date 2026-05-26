@@ -103,6 +103,13 @@ class TrainingValidationTestRoiCalculator:
         self.keep_all_valid_training_points = info.get(
             "keep_all_valid_training_points", False
         )
+        # Pre-Nov-2025 default: training points were drawn from the cylinder
+        # central axis with only validation/test ROIs used as exclusion zones.
+        # Set this to True in the YAML to reproduce that Sep 2024 / Jan 2025
+        # behavior (overrides training_point_selection_mode to "central_axis").
+        self.use_legacy_jan2025_selection = info.get(
+            "use_legacy_jan2025_selection", False
+        )
 
         # Read coordinate_scaling from YAML, default to [1, 1, 1] if not present
         if "coordinate_scaling" in info:

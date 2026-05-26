@@ -154,6 +154,17 @@ class CylindricalAnnotations:
         self.keep_all_valid_training_points = (
             self.roi_calculator.keep_all_valid_training_points
         )
+        # Reproduces Sep 2024 / Jan 2025 default: bresenham central-axis points
+        # gated only by distance from validation/test ROIs (no training-ROI
+        # membership check, no `keep_all_valid_training_points`).
+        if self.roi_calculator.use_legacy_jan2025_selection:
+            if training_point_selection_mode != "central_axis":
+                print(
+                    f"use_legacy_jan2025_selection=True: overriding "
+                    f"training_point_selection_mode "
+                    f"{training_point_selection_mode!r} -> 'central_axis'"
+                )
+            self.training_point_selection_mode = "central_axis"
 
         # 36x36x36 is shape of region used to caluclate loss,so we need to make sure that the center is at least the diagonal away from the validation/test rois
         self.longest_box_diagonal = int(np.ceil(np.sqrt(3 * (36**2)))) + 1
@@ -726,6 +737,11 @@ class CylindricalAnnotations:
         self.training_points_by_object = subsampled_training_points_by_object
 
     def remove_validation_or_test_annotations_from_training(self, mode="all"):
+        # "central_axis" reproduces the Sep 2024 / Jan 2025 default selection
+        # (broad inclusion: keep any cylinder central-axis point that's far
+        # enough from every validation/test ROI). "all" is the Nov 2025+
+        # default (restrictive: center must lie inside exactly one training
+        # ROI, unless keep_all_valid_training_points is set).
         if mode == "deprecated_use_only_single_point":
             self.get_pseudorandom_training_centers()
         elif mode == "central_axis":
