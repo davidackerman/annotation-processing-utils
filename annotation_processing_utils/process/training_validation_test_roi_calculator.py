@@ -104,10 +104,16 @@ class TrainingValidationTestRoiCalculator:
             "keep_all_valid_training_points", False
         )
         # Reproduces Sep 2024 / Jan 2025 behavior for cross-version comparison.
-        # When True:
-        #   - training_point_selection_mode is forced to "central_axis"
-        #     (cylinder central-axis points gated only by validation/test ROI
-        #     distance; no training-ROI membership check)
+        # Selection mode in Jan 2025 was already the current default "all"
+        # (full cylinder fills); the rollback happens inside that path. When
+        # True:
+        #   - get_all_training_points skips the new training-ROI membership
+        #     check (is_valid_center always True)
+        #   - get_all_training_points uses the Jan 2025 exclusion distance
+        #     longest_box_diagonal (~64 voxels) instead of the wider
+        #     ceil(sqrt(3*(36+random_shift_voxels)**2)+1) (~95 with shift=18)
+        #   - random-shift jitter upper bound is exclusive (random_shift),
+        #     matching pre-Nov-2025 np.random.randint behavior
         #   - annotation CSV dedup uses pandas exact-equality (or is skipped
         #     entirely for ROI-calculator-internal sites that had no dedup
         #     pre-Nov-10-2025), not the rtol/atol "allclose" dedup

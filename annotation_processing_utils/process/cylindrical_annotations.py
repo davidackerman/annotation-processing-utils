@@ -154,17 +154,14 @@ class CylindricalAnnotations:
         self.keep_all_valid_training_points = (
             self.roi_calculator.keep_all_valid_training_points
         )
-        # Reproduces Sep 2024 / Jan 2025 default: bresenham central-axis points
-        # gated only by distance from validation/test ROIs (no training-ROI
-        # membership check, no `keep_all_valid_training_points`).
-        if self.roi_calculator.use_legacy_jan2025_selection:
-            if training_point_selection_mode != "central_axis":
-                print(
-                    f"use_legacy_jan2025_selection=True: overriding "
-                    f"training_point_selection_mode "
-                    f"{training_point_selection_mode!r} -> 'central_axis'"
-                )
-            self.training_point_selection_mode = "central_axis"
+        # Reproduces Sep 2024 / Jan 2025 default for cross-version comparison.
+        # Stays in whatever mode the caller picked (default "all"); the actual
+        # rollback happens inside get_all_training_points and the CSV dedup.
+        self.use_legacy_jan2025_selection = (
+            self.roi_calculator.use_legacy_jan2025_selection
+        )
+        if self.use_legacy_jan2025_selection:
+            print("use_legacy_jan2025_selection=True: reproducing Jan 2025 behavior")
 
         # 36x36x36 is shape of region used to caluclate loss,so we need to make sure that the center is at least the diagonal away from the validation/test rois
         self.longest_box_diagonal = int(np.ceil(np.sqrt(3 * (36**2)))) + 1
@@ -632,6 +629,9 @@ class CylindricalAnnotations:
             # If keep_all_valid_training_points is True, skip the training ROI check
             if self.keep_all_valid_training_points:
                 return True
+            # Sep 2024 / Jan 2025 had no training-ROI membership check at all.
+            if self.use_legacy_jan2025_selection:
+                return True
 
             # is a valid center if it is within one and only one rois_dict["training"]
             count = 0
@@ -674,19 +674,31 @@ class CylindricalAnnotations:
 
             found_valid_point = False
             cylinder_voxels = np.array(cylinder_voxels)
-            # Use 36 since we want to include both the current roi and the neighboring roi boxes
-            valid_idxs = get_valid_idxs(
-                cylinder_voxels,
-                np.ceil(np.sqrt(3 * (36 + random_shift_voxels) ** 2) + 1),
-            )
+            # Jan 2025 used self.longest_box_diagonal (~64); Nov 2025 widened
+            # this to also pad by random_shift_voxels (~95 with shift=18).
+            if self.use_legacy_jan2025_selection:
+                min_distance = self.longest_box_diagonal
+            else:
+                # Use 36 since we want to include both the current roi and the neighboring roi boxes
+                min_distance = np.ceil(
+                    np.sqrt(3 * (36 + random_shift_voxels) ** 2) + 1
+                )
+            valid_idxs = get_valid_idxs(cylinder_voxels, min_distance)
             if np.sum(valid_idxs) > 0:
                 valid_voxels = cylinder_voxels[valid_idxs]
                 valid_voxels = np.round(valid_voxels * self.voxel_size[0]).astype(int)
                 if random_shift_voxels:
                     random_shift = random_shift_voxels * self.voxel_size[0]
+                    # Jan 2025 randint upper bound was exclusive (random_shift);
+                    # Nov 2025 made it inclusive (random_shift + 1).
+                    high = (
+                        random_shift
+                        if self.use_legacy_jan2025_selection
+                        else random_shift + 1
+                    )
                     valid_voxels += np.random.randint(
                         -random_shift,
-                        random_shift + 1,
+                        high,
                         size=(len(valid_voxels), 3),
                     )
                 # map cylinder voxels to tuple
@@ -740,11 +752,11 @@ class CylindricalAnnotations:
         self.training_points_by_object = subsampled_training_points_by_object
 
     def remove_validation_or_test_annotations_from_training(self, mode="all"):
-        # "central_axis" reproduces the Sep 2024 / Jan 2025 default selection
-        # (broad inclusion: keep any cylinder central-axis point that's far
-        # enough from every validation/test ROI). "all" is the Nov 2025+
-        # default (restrictive: center must lie inside exactly one training
-        # ROI, unless keep_all_valid_training_points is set).
+        # "all" has been the default since Sep 13 2024. The Sep 2024 / Jan 2025
+        # version of this path is reproduced via use_legacy_jan2025_selection
+        # (see ROI calculator) — it disables the Nov 2025 training-ROI
+        # membership check, restores the narrower exclusion distance, and
+        # restores the exclusive random-shift upper bound.
         if mode == "deprecated_use_only_single_point":
             self.get_pseudorandom_training_centers()
         elif mode == "central_axis":
