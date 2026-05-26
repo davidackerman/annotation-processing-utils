@@ -216,17 +216,20 @@ class CylindricalAnnotations:
             dfs.append(pd.read_csv(annotation_csv))
         df = pd.concat(dfs)
         # remove duplicate rows from dataframe
-        df = drop_close_duplicates_allclose(
-            df,
-            coord_cols=[
-                "start z (nm)",
-                "start y (nm)",
-                "start x (nm)",
-                "end z (nm)",
-                "end y (nm)",
-                "end x (nm)",
-            ],
-        )
+        # Pre-Nov-10-2025 used pandas exact-equality dedup; the allclose version
+        # is more aggressive (tolerates rtol=1e-5/atol=1e-8 near-duplicates).
+        dedup_cols = [
+            "start z (nm)",
+            "start y (nm)",
+            "start x (nm)",
+            "end z (nm)",
+            "end y (nm)",
+            "end x (nm)",
+        ]
+        if self.roi_calculator.use_legacy_jan2025_selection:
+            df = df.drop_duplicates(subset=dedup_cols)
+        else:
+            df = drop_close_duplicates_allclose(df, coord_cols=dedup_cols)
         # # use only first 500 annotations
         if self.debug:
             df = df.iloc[:100]

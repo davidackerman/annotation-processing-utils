@@ -103,10 +103,14 @@ class TrainingValidationTestRoiCalculator:
         self.keep_all_valid_training_points = info.get(
             "keep_all_valid_training_points", False
         )
-        # Pre-Nov-2025 default: training points were drawn from the cylinder
-        # central axis with only validation/test ROIs used as exclusion zones.
-        # Set this to True in the YAML to reproduce that Sep 2024 / Jan 2025
-        # behavior (overrides training_point_selection_mode to "central_axis").
+        # Reproduces Sep 2024 / Jan 2025 behavior for cross-version comparison.
+        # When True:
+        #   - training_point_selection_mode is forced to "central_axis"
+        #     (cylinder central-axis points gated only by validation/test ROI
+        #     distance; no training-ROI membership check)
+        #   - annotation CSV dedup uses pandas exact-equality (or is skipped
+        #     entirely for ROI-calculator-internal sites that had no dedup
+        #     pre-Nov-10-2025), not the rtol/atol "allclose" dedup
         self.use_legacy_jan2025_selection = info.get(
             "use_legacy_jan2025_selection", False
         )
@@ -203,17 +207,19 @@ class TrainingValidationTestRoiCalculator:
         for annotation_csv in self.annotation_csvs:
             dfs.append(pd.read_csv(annotation_csv))
         df = pd.concat(dfs)
-        df = drop_close_duplicates_allclose(
-            df,
-            [
-                "start z (nm)",
-                "start y (nm)",
-                "start x (nm)",
-                "end z (nm)",
-                "end y (nm)",
-                "end x (nm)",
-            ],
-        )
+        # Sep 2024 / Jan 2025 had no dedup here; only added Nov 10 2025.
+        if not self.use_legacy_jan2025_selection:
+            df = drop_close_duplicates_allclose(
+                df,
+                [
+                    "start z (nm)",
+                    "start y (nm)",
+                    "start x (nm)",
+                    "end z (nm)",
+                    "end y (nm)",
+                    "end x (nm)",
+                ],
+            )
 
         (
             self.all_annotation_starts_voxels,
@@ -247,17 +253,19 @@ class TrainingValidationTestRoiCalculator:
         self, annotation_csv, shrink_to_fit_annotations=False
     ):
         df = pd.read_csv(annotation_csv)
-        df = drop_close_duplicates_allclose(
-            df,
-            [
-                "start z (nm)",
-                "start y (nm)",
-                "start x (nm)",
-                "end z (nm)",
-                "end y (nm)",
-                "end x (nm)",
-            ],
-        )
+        # Sep 2024 / Jan 2025 had no dedup here; only added Nov 10 2025.
+        if not self.use_legacy_jan2025_selection:
+            df = drop_close_duplicates_allclose(
+                df,
+                [
+                    "start z (nm)",
+                    "start y (nm)",
+                    "start x (nm)",
+                    "end z (nm)",
+                    "end y (nm)",
+                    "end x (nm)",
+                ],
+            )
         (
             annotation_starts,
             annotation_ends,
